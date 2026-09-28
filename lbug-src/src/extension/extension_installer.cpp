@@ -98,11 +98,18 @@ void ExtensionInstaller::tryDownloadExtensionFile(const ExtensionRepoInfo& repoI
 }
 
 bool ExtensionInstaller::install() {
+#ifdef LBUG_NO_EXTENSION_INSTALLER
+    // Fail clearly rather than fall back to an unencrypted download.
+    throw common::IOException(std::format(
+        "Cannot install extension \"{}\": this build of lbug has no extension installer.",
+        info.name));
+#else
     auto install = installExtension();
     if (install) {
         installDependencies();
     }
     return install;
+#endif
 }
 
 bool ExtensionInstaller::installExtension() {

@@ -98,15 +98,17 @@ fn link_libraries(link_bundled_deps: bool) {
             println!("cargo:rustc-link-lib=dylib=stdc++");
         }
 
-        link_openssl();
+        if cfg!(feature = "extension_installer") {
+            link_openssl();
 
-        let (ssl_name, crypto_name) = if cfg!(windows) {
-            ("libssl", "libcrypto")
-        } else {
-            ("ssl", "crypto")
-        };
-        println!("cargo:rustc-link-lib=dylib={ssl_name}");
-        println!("cargo:rustc-link-lib=dylib={crypto_name}");
+            let (ssl_name, crypto_name) = if cfg!(windows) {
+                ("libssl", "libcrypto")
+            } else {
+                ("ssl", "crypto")
+            };
+            println!("cargo:rustc-link-lib=dylib={ssl_name}");
+            println!("cargo:rustc-link-lib=dylib={crypto_name}");
+        }
 
         if !link_bundled_deps {
             return;
@@ -366,7 +368,19 @@ fn build_bundled_cmake() -> Vec<PathBuf> {
         .no_build_target(true)
         .define("BUILD_SHELL", "OFF")
         .define("BUILD_SINGLE_FILE_HEADER", "OFF")
-        .define("AUTO_UPDATE_GRAMMAR", "OFF");
+        .define("AUTO_UPDATE_GRAMMAR", "OFF")
+        .define(
+            "LBUG_EXTENSION_INSTALLER",
+            if cfg!(feature = "extension_installer") {
+                "ON"
+            } else {
+                "OFF"
+            },
+        );
+    if link_mode() == "static" {
+        // The static link never uses the shared library, the largest link.
+        build.define("BUILD_SHARED_LBUG", "OFF");
+    }
     if cfg!(windows) {
         if Command::new("ninja")
             .arg("--version")

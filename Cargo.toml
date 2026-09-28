@@ -48,7 +48,8 @@ all-features = true
 
 [features]
 arrow = ["dep:arrow"]
-default = []
+default = ["extension_installer"]
+extension_installer = []
 extension_tests = []
 
 [lib]
