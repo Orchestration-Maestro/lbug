@@ -360,10 +360,49 @@ fn get_lbug_root() -> PathBuf {
     lbug_dir
 }
 
+/// With `LBUG_REUSE_CMAKE_BUILD` set, the CMake build lives in one directory
+/// beside the build scripts' own, named after everything that shapes it, and a
+/// finished build there is reused as it is. Cargo gives this build script a new
+/// `OUT_DIR` whenever the features, flags or package selection around it change
+/// (coverage, a mutation run, `-p` against `--workspace`), but the C++ library
+/// is the same. Only for sources that never change in place (a registry or git
+/// checkout): an edited tree is not rebuilt.
+fn reused_cmake_dir(lbug_root: &Path) -> Option<PathBuf> {
+    println!("cargo:rerun-if-env-changed=LBUG_REUSE_CMAKE_BUILD");
+    env::var_os("LBUG_REUSE_CMAKE_BUILD")?;
+    // OUT_DIR is <profile>/build/lbug-<hash>/out.
+    let out_dir = PathBuf::from(env::var_os("OUT_DIR")?);
+    let build_scripts = out_dir.parent()?.parent()?;
+    let mut shape = format!(
+        "{}|{}|{}|{}",
+        lbug_root.display(),
+        env!("CARGO_PKG_VERSION"),
+        link_mode(),
+        cfg!(feature = "extension_installer")
+    );
+    for var in [
+        "TARGET", "HOST", "PROFILE", "OPT_LEVEL", "DEBUG", "CC", "CXX", "CFLAGS", "CXXFLAGS",
+    ] {
+        println!("cargo:rerun-if-env-changed={var}");
+        shape.push('|');
+        shape.push_str(&env::var(var).unwrap_or_default());
+    }
+    // FNV-1a: a stable name, whatever the compiler that builds this script.
+    let hash = shape.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+    });
+    Some(build_scripts.join(format!("lbug-cmake-{hash:016x}")))
+}
+
 fn build_bundled_cmake() -> Vec<PathBuf> {
     let lbug_root = get_lbug_root();
+    let reused_dir = reused_cmake_dir(&lbug_root);
+    let finished = reused_dir.as_ref().map(|dir| dir.join("lbug-build-finished"));
 
     let mut build = cmake::Config::new(&lbug_root);
+    if let Some(dir) = &reused_dir {
+        build.out_dir(dir);
+    }
     build
         .no_build_target(true)
         .define("BUILD_SHELL", "OFF")
@@ -399,7 +438,13 @@ fn build_bundled_cmake() -> Vec<PathBuf> {
     if let Ok(jobs) = std::env::var("NUM_JOBS") {
         std::env::set_var("CMAKE_BUILD_PARALLEL_LEVEL", jobs);
     }
-    let build_dir = build.build();
+    let build_dir = match (&reused_dir, &finished) {
+        (Some(dir), Some(stamp)) if stamp.exists() => dir.clone(),
+        _ => build.build(),
+    };
+    if let Some(stamp) = &finished {
+        std::fs::write(stamp, "").expect("Failed to mark the reused CMake build finished");
+    }
 
     let lbug_lib_path = build_dir.join("build").join("src");
     println!("cargo:rustc-link-search=native={}", lbug_lib_path.display());
