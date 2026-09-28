@@ -79,7 +79,10 @@ fn link_libraries(link_bundled_deps: bool) {
     } else if link_mode() == "dylib" {
         println!("cargo:rustc-link-lib={}=lbug", link_mode());
     } else if rustversion::cfg!(since(1.82)) {
-        println!("cargo:rustc-link-lib=static:+whole-archive=lbug");
+        // Not bundled: a debug liblbug is gigabytes, and bundling copied it
+        // into every rlib of this crate. The final link finds it by the search
+        // path this script prints.
+        println!("cargo:rustc-link-lib=static:+whole-archive,-bundle=lbug");
     } else {
         println!("cargo:rustc-link-lib=static=lbug");
     }
@@ -394,6 +397,24 @@ fn reused_cmake_dir(lbug_root: &Path) -> Option<PathBuf> {
     Some(build_scripts.join(format!("lbug-cmake-{hash:016x}")))
 }
 
+/// Deletes the object files under `dir`, the static archives kept.
+fn remove_objects(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            remove_objects(&path);
+        } else if path
+            .extension()
+            .is_some_and(|extension| extension == "o" || extension == "obj")
+        {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
 fn build_bundled_cmake() -> Vec<PathBuf> {
     let lbug_root = get_lbug_root();
     let reused_dir = reused_cmake_dir(&lbug_root);
@@ -442,8 +463,13 @@ fn build_bundled_cmake() -> Vec<PathBuf> {
         (Some(dir), Some(stamp)) if stamp.exists() => dir.clone(),
         _ => build.build(),
     };
-    if let Some(stamp) = &finished {
-        std::fs::write(stamp, "").expect("Failed to mark the reused CMake build finished");
+    if let (Some(dir), Some(stamp)) = (&reused_dir, &finished) {
+        if !stamp.exists() {
+            // The archives hold every object, and a finished build never runs
+            // CMake again: the objects are half the directory's size.
+            remove_objects(dir);
+            std::fs::write(stamp, "").expect("Failed to mark the reused CMake build finished");
+        }
     }
 
     let lbug_lib_path = build_dir.join("build").join("src");
