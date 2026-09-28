@@ -13,11 +13,13 @@ patch that Maestro needs. The code is upstream's, under its MIT licence
 
 ## Branch layout
 
-Branch `patched-<version>` holds two commits:
+Branches are named `build/patched-<version>` (the organization's branch-name
+rules require a prefix such as `build/`). Each holds:
 
 1. the published crate, unmodified: the contents of `lbug-<version>.crate`
    from crates.io, plus the binding's `LICENSE`, which the crate leaves out;
-2. the patch below.
+2. the OpenSSL patch below;
+3. the build-reuse commits below.
 
 ## The patch
 
@@ -43,14 +45,32 @@ For a static link, `build.rs` also sets `BUILD_SHARED_LBUG=OFF`: the shared
 library, the largest link of the build, is never used then. This is the
 configuration upstream's WebAssembly build already uses.
 
+## Build reuse
+
+The C++ engine takes 13 to 18 minutes to build, and Cargo rebuilds it
+whenever the fingerprint of the crate changes: other features, other
+`RUSTFLAGS` (coverage, mutation testing), `-p` against `--workspace`.
+
+- With `LBUG_REUSE_CMAKE_BUILD` set, the CMake build lives in
+  `<profile>/build/lbug-cmake-<hash>`, the hash naming the source path,
+  version, link mode, installer feature, target, profile and C/C++ compiler
+  settings. A finished build there is reused without running CMake, which
+  also holds after a CI cache restore, where fresh source timestamps would
+  make `make` rebuild everything. It then deletes its object files: the
+  archives hold them all. Opt-in, for sources that never change in place (a
+  registry or git checkout).
+- `liblbug` links `-bundle`: a debug archive is 2.6 GB, and bundling copied
+  it into every rlib of the crate, with about 7 GB of memory.
+
 ## Moving to a new upstream version
 
 1. Download `lbug-<new>.crate` from crates.io and record its sha256.
 2. Create `patched-<new>` from an empty tree, extract the crate into it, add
    `LICENSE` from the binding commit named in `.cargo_vcs_info.json`, and
    commit that as the import.
-3. Cherry-pick the patch commit from the previous branch and resolve any
-   conflict in the six files it touches.
+3. Cherry-pick the patch commits from the previous branch and resolve any
+   conflict (they touch `build.rs`, the two manifests, two `CMakeLists.txt`
+   and `extension_installer.cpp`).
 4. In maestro-core, update the `lbug` version and the `rev` of the patch.
 
 If upstream ships an OpenSSL-free option, drop this repository and use the
