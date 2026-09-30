@@ -2,8 +2,6 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const PREBUILT_CACHE_DIR: &str = ".cache/lbug-prebuilt";
-
 fn link_mode() -> &'static str {
     if env::var("LBUG_SHARED").is_ok() {
         "dylib"
@@ -49,7 +47,10 @@ fn link_openssl() {
 
     #[cfg(target_os = "macos")]
     {
-        for prefix in ["/opt/homebrew/opt/openssl/lib", "/usr/local/opt/openssl/lib"] {
+        for prefix in [
+            "/opt/homebrew/opt/openssl/lib",
+            "/usr/local/opt/openssl/lib",
+        ] {
             let path = PathBuf::from(prefix);
             if path.is_dir() {
                 println!("cargo:rustc-link-search=native={}", path.display());
@@ -149,144 +150,12 @@ fn manifest_dir() -> PathBuf {
     PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap())
 }
 
-fn static_lbug_file_name() -> &'static str {
-    if cfg!(windows) {
-        "lbug.lib"
-    } else {
-        "liblbug.a"
-    }
-}
-
-fn prebuilt_cache_key() -> String {
-    let source = if let Ok(run_id) = env::var("LBUG_PRECOMPILED_RUN_ID") {
-        format!("run-{run_id}")
-    } else if let Ok(version) = env::var("LBUG_VERSION") {
-        format!("version-{version}")
-    } else {
-        "latest".to_string()
-    };
-
-    source
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect()
-}
-
-fn prebuilt_lib_dir(manifest_dir: &Path) -> PathBuf {
-    manifest_dir
-        .join(PREBUILT_CACHE_DIR)
-        .join(prebuilt_cache_key())
-        .join("lib")
-}
-
-fn prebuilt_source_desc() -> String {
-    let repo =
-        env::var("LBUG_GITHUB_REPOSITORY").unwrap_or_else(|_| "LadybugDB/ladybug".to_string());
-    if let Ok(run_id) = env::var("LBUG_PRECOMPILED_RUN_ID") {
-        format!("run:{repo}/{run_id}")
-    } else if let Ok(version) = env::var("LBUG_VERSION") {
-        let version = version.strip_prefix('v').unwrap_or(&version);
-        format!("release:{repo}/v{version}")
-    } else {
-        format!("release:{repo}/latest")
-    }
-}
-
 fn emit_lbug_metadata(source: &str, lib_dir: &Path) {
     println!("cargo:rustc-env=LBUG_PRECOMPILED_SOURCE={source}");
     println!(
         "cargo:rustc-env=LBUG_PRECOMPILED_LIBRARY_DIR={}",
         lib_dir.display()
     );
-}
-
-fn try_download_prebuilt_lbug(manifest_dir: &Path) -> bool {
-    for var in [
-        "LBUG_PRECOMPILED_RUN_ID",
-        "LBUG_VERSION",
-        "LBUG_GITHUB_REPOSITORY",
-        "LBUG_LINUX_VARIANT",
-        "LBUG_LIB_KIND",
-        "LBUG_BUILD_FROM_SOURCE",
-        "LBUG_RUST_BUILD_FROM_SOURCE",
-    ] {
-        println!("cargo:rerun-if-env-changed={var}");
-    }
-
-    if link_mode() != "static" {
-        return false;
-    }
-    if env::var("LBUG_BUILD_FROM_SOURCE").is_ok() || env::var("LBUG_RUST_BUILD_FROM_SOURCE").is_ok()
-    {
-        println!("cargo:warning=Skipping prebuilt liblbug because source build was requested");
-        return false;
-    }
-
-    let lib_dir = prebuilt_lib_dir(manifest_dir);
-    let lib_path = lib_dir.join(static_lbug_file_name());
-    if lib_path.exists() {
-        return true;
-    }
-
-    let sh_script = manifest_dir.join("scripts").join("download_lbug.sh");
-    let ps_script = manifest_dir.join("scripts").join("download_lbug.ps1");
-
-    if sh_script.exists() {
-        let status = Command::new("sh")
-            .arg(&sh_script)
-            .env("LBUG_TARGET_DIR", &lib_dir)
-            .current_dir(manifest_dir)
-            .status();
-
-        match status {
-            Ok(s) if s.success() && lib_path.exists() => return true,
-            Ok(s) => println!(
-                "cargo:warning=Prebuilt liblbug download failed with status {s}; building from source"
-            ),
-            Err(e) => println!(
-                "cargo:warning=Could not run prebuilt liblbug downloader ({e}); building from source"
-            ),
-        }
-    }
-
-    if cfg!(windows) && ps_script.exists() {
-        let status = std::process::Command::new("powershell")
-            .args(["-NoProfile", "-NonInteractive", "-File"])
-            .arg(&ps_script)
-            .env("LBUG_TARGET_DIR", &lib_dir)
-            .current_dir(manifest_dir)
-            .status();
-
-        match status {
-            Ok(s) if s.success() && lib_path.exists() => return true,
-            Ok(s) => println!(
-                "cargo:warning=Prebuilt liblbug download failed with status {s}; building from source"
-            ),
-            Err(e) => println!(
-                "cargo:warning=Could not run prebuilt liblbug downloader ({e}); building from source"
-            ),
-        }
-    }
-
-    false
-}
-
-fn use_prebuilt_lbug(manifest_dir: &Path) -> Option<Vec<PathBuf>> {
-    if !try_download_prebuilt_lbug(manifest_dir) {
-        return None;
-    }
-
-    let lib_dir = prebuilt_lib_dir(manifest_dir);
-    println!("cargo:rustc-link-search=native={}", lib_dir.display());
-    println!("cargo:rerun-if-changed={}", lib_dir.display());
-    emit_lbug_metadata(&prebuilt_source_desc(), &lib_dir);
-    Some(vec![lib_dir])
 }
 
 fn get_lbug_root() -> PathBuf {
@@ -314,53 +183,7 @@ fn get_lbug_root() -> PathBuf {
         }
     }
 
-    let lbug_dir = manifest_dir.join("lbug-src");
-    if !lbug_dir.exists() {
-        let version = std::env::var("LBUG_VERSION").unwrap_or_else(|_| "main".to_string());
-        println!("Downloading ladybug source version {version}...");
-        let url = if version.starts_with('v') {
-            format!(
-                "https://github.com/LadybugDB/ladybug/archive/refs/tags/{}.tar.gz",
-                version
-            )
-        } else if version == "main" {
-            "https://github.com/LadybugDB/ladybug/archive/refs/heads/main.tar.gz".to_string()
-        } else {
-            format!(
-                "https://github.com/LadybugDB/ladybug/archive/refs/tags/v{}.tar.gz",
-                version
-            )
-        };
-
-        let output = std::process::Command::new("curl")
-            .args(["-sL", &url])
-            .arg("-o")
-            .arg("ladybug.tar.gz")
-            .current_dir(&manifest_dir)
-            .output()
-            .expect("Failed to download ladybug source");
-
-        if !output.status.success() {
-            panic!("Failed to download ladybug source from {}", url);
-        }
-
-        std::fs::create_dir_all(&lbug_dir).expect("Failed to create lbug-src directory");
-        std::process::Command::new("tar")
-            .args([
-                "-xzf",
-                "ladybug.tar.gz",
-                "--strip-components=1",
-                "-C",
-                "lbug-src",
-            ])
-            .current_dir(&manifest_dir)
-            .status()
-            .expect("Failed to extract ladybug source");
-
-        std::fs::remove_file(manifest_dir.join("ladybug.tar.gz")).ok();
-    }
-
-    lbug_dir
+    panic!("Bundled lbug-src is missing; provide LBUG_SOURCE_DIR for a local source checkout");
 }
 
 /// With `LBUG_REUSE_CMAKE_BUILD` set, the CMake build lives in one directory
@@ -553,8 +376,6 @@ fn main() {
         println!("cargo:rustc-link-arg=-Wl,-rpath,{lbug_lib_dir}");
         emit_lbug_metadata("external", Path::new(&lbug_lib_dir));
         include_paths.push(Path::new(&lbug_include).to_path_buf());
-    } else if let Some(prebuilt_include_paths) = use_prebuilt_lbug(&manifest_dir) {
-        include_paths.extend(prebuilt_include_paths);
     } else {
         include_paths.extend(build_bundled_cmake());
         bundled = true;

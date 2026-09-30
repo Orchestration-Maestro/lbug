@@ -1,0 +1,62 @@
+name: Maestro native safety
+
+on:
+  pull_request:
+    branches: [build/patched-0.20.4]
+  push:
+    branches: [build/patched-0.20.4]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  source-default:
+    name: source-default (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: 3
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+      - name: Check the explicit lint-only no-link accommodation
+        shell: bash
+        env:
+          DOCS_RS: '1'
+          LBUG_PRECOMPILED_SOURCE: lint-only
+          LBUG_PRECOMPILED_LIBRARY_DIR: ''
+        run: cargo check --locked --no-default-features --all-targets
+      - name: Prove the historical downloader trips the network trap
+        shell: bash
+        run: |
+          set -euo pipefail
+          git worktree add --detach "$RUNNER_TEMP/lbug-downloader-control" 575d94fbd1afc4fbebe5a9a2332c6be0d9dcdc49
+          if python scripts/test_source_default.py --repository "$RUNNER_TEMP/lbug-downloader-control" --evidence "$RUNNER_TEMP/source-default-red"; then
+            echo "Historical downloader unexpectedly passed"
+            exit 1
+          fi
+          python -c 'import os,pathlib; p=pathlib.Path(os.environ["RUNNER_TEMP"])/"source-default-red/attempt-count.txt"; assert int(p.read_text()) > 0'
+      - name: Build and run an external source-default consumer
+        shell: bash
+        run: python scripts/test_source_default.py --evidence "$RUNNER_TEMP/source-default-green"
+      - name: Keep transcripts and network attempt counters
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-default-${{ matrix.os }}-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/source-default-red
+            ${{ runner.temp }}/source-default-green
+          if-no-files-found: error
