@@ -149,9 +149,42 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $env:LBUG_LIBRARY_DIR = "$pwd/target/native-safety/engine/src/Release"
+          # The engine's Windows LIBRARY_OUTPUT_PATH uses the top-level CMAKE_BINARY_DIR.
+          $env:LBUG_LIBRARY_DIR = "$pwd/target/native-safety/src/Release"
+          if (!(Test-Path "$env:LBUG_LIBRARY_DIR/lbug.lib")) { throw 'Source-built lbug.lib is missing' }
           $env:LBUG_INCLUDE_DIR = "$pwd/lbug-src/src/include"
           $env:CXXFLAGS = "/DLBUG_BUNDLED /I$pwd/target/native-safety/engine/src/include"
+          cargo test --release --locked --no-default-features native_safety_tests
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # Red proof for the Windows capability-acquisition guard, then restore green.
+          $source = 'lbug-src/src/common/file_system/root_directory.cpp'
+          $old = 'throw IOException("Restricted root capability is unsupported on Windows (E02).");'
+          $new = 'return std::shared_ptr<RootDirectory>(new RootDirectory());'
+          try {
+            $text = Get-Content -Raw $source
+            if (!$text.Contains($old)) { throw 'Windows refusal mutation did not match' }
+            [System.IO.File]::WriteAllText((Join-Path $pwd $source), $text.Replace($old, $new))
+            cmake --build target/native-safety --config Release --parallel 3
+            if ($LASTEXITCODE -ne 0) { throw 'Windows mutant did not build' }
+            $native = ctest --test-dir target/native-safety --build-config Release --verbose --output-on-failure 2>&1
+            $nativeExit = $LASTEXITCODE
+            $native | Tee-Object windows-native-mutant.txt
+            if ($nativeExit -ne 8 -or !($native -match 'FAIL windows fails closed')) { throw 'Native Windows mutant survived' }
+            cargo clean -p lbug --release
+            if ($LASTEXITCODE -ne 0) { throw 'Could not invalidate the reused Rust archive' }
+            $rust = cargo test --release --locked --no-default-features native_safety_tests 2>&1
+            $rustExit = $LASTEXITCODE
+            $rust | Tee-Object windows-rust-mutant.txt
+            if ($rustExit -ne 101 -or !($rust -match 'restricted_mode_fails_closed_on_windows .*FAILED')) { throw 'Rust Windows mutant survived' }
+          } finally {
+            git checkout -- $source
+          }
+          cmake --build target/native-safety --config Release --parallel 3
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ctest --test-dir target/native-safety --build-config Release --verbose --output-on-failure
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo clean -p lbug --release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --release --locked --no-default-features native_safety_tests
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Format Rust bindings
@@ -166,3 +199,4 @@ jobs:
           path: |
             target/native-safety/Testing/Temporary/LastTest.log
             native-filesystem-audit.txt
+            windows-*-mutant.txt

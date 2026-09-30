@@ -4,6 +4,7 @@
 #include <thread>
 
 #include "common/exception/checkpoint.h"
+#include "common/exception/io.h"
 #include "common/exception/transaction_manager.h"
 #include "common/task_system/progress_bar.h"
 #include "main/attached_database.h"
@@ -301,6 +302,9 @@ void TransactionManager::tryCheckpoint(main::ClientContext& clientContext) {
 }
 
 void TransactionManager::checkpointNoLock(main::ClientContext& clientContext) {
+    if (clientContext.getDatabase()->isRestrictedProjection()) {
+        throw IOException("Restricted filesystem checkpoint is unsupported in E01a.");
+    }
     QueryProgressScope progress{clientContext, 0.01};
     // We only need to wait for active write transactions to leave the system before
     // checkpointing. Read transactions can continue safely because they use MVCC snapshot

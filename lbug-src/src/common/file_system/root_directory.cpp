@@ -36,6 +36,10 @@ bool RootDirectory::probeRegularFile(const std::string& name) {
     throw IOException("Restricted regular-file probe is unsupported on Windows (E02).");
 }
 #else
+#ifdef MAESTRO_NATIVE_OPEN_TEST
+// Only the native harness sets this callback; archive reuse leaves it inert.
+void (*maestroBeforeRestrictedOpen)(int directory, const char* name) = nullptr;
+#endif
 namespace {
 bool sameIdentity(const struct stat& a, const struct stat& b) {
     return a.st_dev == b.st_dev && a.st_ino == b.st_ino;
@@ -135,6 +139,11 @@ int RootDirectory::openFile(const std::string& name, int flags) {
     // Never truncate during open: an opened inode must be checked before content access.
     auto safeFlags = (flags & ~O_TRUNC) | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK;
     if (!existed && (flags & O_CREAT)) { safeFlags |= O_EXCL; }
+#ifdef MAESTRO_NATIVE_OPEN_TEST
+    if (maestroBeforeRestrictedOpen) {
+        maestroBeforeRestrictedOpen(state->descriptors.back(), name.c_str());
+    }
+#endif
     const auto fd = openat(state->descriptors.back(), name.c_str(), safeFlags, 0600);
     if (fd < 0) { throw IOException("Cannot open restricted regular file."); }
     try {

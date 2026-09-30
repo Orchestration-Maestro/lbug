@@ -1,6 +1,8 @@
 #include "common/file_system/local_file_system.h"
 #include "common/file_system/virtual_file_system.h"
+#include "main/connection.h"
 #include "main/database.h"
+#include "main/query_result.h"
 #include "storage/buffer_manager/buffer_manager.h"
 #include <filesystem>
 #include <fstream>
@@ -10,6 +12,7 @@
 #include <type_traits>
 #include <utility>
 #ifndef _WIN32
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -52,6 +55,17 @@ Snapshot outsideSnapshot(const fs::path& parent, const fs::path& root, const fs:
         }
     }
     return result;
+}
+namespace lbug::common {
+extern void (*maestroBeforeRestrictedOpen)(int directory, const char* name);
+}
+void replaceBeforeRestrictedOpen(int directory, const char* name) {
+    maestroBeforeRestrictedOpen = nullptr;
+    require(renameat(directory, name, directory, "interleave-original") == 0, "rename original");
+    auto fd = openat(directory, name, O_CREAT | O_EXCL | O_WRONLY, 0600);
+    require(fd >= 0, "create replacement");
+    require(write(fd, "replacement", 11) == 11, "write replacement");
+    close(fd);
 }
 #endif
 int main() {
@@ -203,6 +217,84 @@ int main() {
         checked([&] { lbug::main::Database db(root, "normal.lbdb", config); });
         require(!fs::exists(rootPath / "normal.lbdb.tmp"), "startup created temp file");
     });
+    auto checkpointConfig = [] {
+        auto config = lbug::main::SystemConfig(16 * 1024 * 1024, 1);
+        config.maxDBSize = 64 * 1024 * 1024;
+        config.forceCheckpointOnClose = false;
+        return config;
+    };
+    auto reopenCheckpoint = [&](const char* name, auto config) {
+        config.readOnly = true;
+        checked([&] { lbug::main::Database db(root, name, config); });
+        config.readOnly = false;
+        checked([&] { lbug::main::Database db(root, name, config); });
+    };
+    auto noCheckpointSidecars = [&](const char* name) {
+        for (const auto& entry : fs::directory_iterator(rootPath)) {
+            require(!entry.path().filename().string().starts_with(std::string(name) + "."),
+                "checkpoint created a sidecar");
+        }
+    };
+    test("empty checkpoint refusal keeps database reopenable", [&] {
+        auto config = checkpointConfig();
+        {
+            lbug::main::Database db(root, "checkpoint-repro.lbdb", config);
+            const auto beforeBytes = bytes(rootPath / "checkpoint-repro.lbdb");
+            lbug::main::Connection connection(&db);
+            auto result = checked([&] { return connection.query("CHECKPOINT"); });
+            require(!result->isSuccess(), "unsupported checkpoint succeeded");
+            require(beforeBytes == bytes(rootPath / "checkpoint-repro.lbdb"), "checkpoint changed base bytes");
+            noCheckpointSidecars("checkpoint-repro.lbdb");
+        }
+        reopenCheckpoint("checkpoint-repro.lbdb", config);
+    });
+    test("default rooted close keeps empty database reopenable", [&] {
+        auto config = checkpointConfig();
+        std::string beforeBytes;
+        config.forceCheckpointOnClose = true;
+        {
+            lbug::main::Database db(root, "close-repro.lbdb", config);
+            beforeBytes = bytes(rootPath / "close-repro.lbdb");
+        }
+        require(beforeBytes == bytes(rootPath / "close-repro.lbdb"), "close changed base bytes");
+        noCheckpointSidecars("close-repro.lbdb");
+        config.forceCheckpointOnClose = false;
+        reopenCheckpoint("close-repro.lbdb", config);
+    });
+    test("rooted auto checkpoint refuses before changing base", [&] {
+        auto config = checkpointConfig();
+        config.autoCheckpoint = true;
+        config.checkpointThreshold = 0;
+        lbug::main::Database db(root, "auto-checkpoint.lbdb", config);
+        const auto beforeBytes = bytes(rootPath / "auto-checkpoint.lbdb");
+        lbug::main::Connection connection(&db);
+        auto result = checked([&] {
+            return connection.query("CREATE NODE TABLE Auto(id INT64, PRIMARY KEY(id))");
+        });
+        require(!result->isSuccess() &&
+            result->getErrorMessage().find("post-commit checkpoint failed") != std::string::npos &&
+            result->getErrorMessage().find("Restricted filesystem checkpoint") != std::string::npos,
+            "auto checkpoint did not reach restricted refusal");
+        require(beforeBytes == bytes(rootPath / "auto-checkpoint.lbdb"), "auto checkpoint changed base bytes");
+        require(fs::exists(rootPath / "auto-checkpoint.lbdb.wal"), "committed WAL missing");
+        for (auto suffix : {".shadow", ".wal.checkpoint", ".checkpoint.intent.lock", ".checkpoint.apply.lock"}) {
+            require(!fs::exists(rootPath / (std::string("auto-checkpoint.lbdb") + suffix)),
+                "auto checkpoint created a sidecar");
+        }
+    });
+    test("rooted writable recovery refuses existing sidecars", [&] {
+        auto config = checkpointConfig();
+        for (auto suffix : {".wal", ".wal.checkpoint", ".shadow"}) {
+            auto name = std::string("recovery") + suffix + ".lbdb";
+            checked([&] { lbug::main::Database db(root, name, config); });
+            const auto beforeBytes = bytes(rootPath / name);
+            std::ofstream(rootPath / (name + suffix)) << "pending recovery";
+            refused([&] { checked([&] { lbug::main::Database db(root, name, config); }); },
+                "Restricted writable WAL recovery");
+            require(beforeBytes == bytes(rootPath / name), "recovery changed base bytes");
+            require(bytes(rootPath / (name + suffix)) == "pending recovery", "recovery changed sidecar");
+        }
+    });
     test("forced spill fails closed without temp file", [&] {
         lbug::storage::BufferManager bm("spill.lbdb", "spill.lbdb.tmp", 16 * 1024 * 1024,
             64 * 1024 * 1024, &vfs, true);
@@ -237,6 +329,28 @@ int main() {
         for (auto mode : modes) {
             refused([&] { checkedAt(isolated, [&] { isolatedFS.openFile("sentinel", FileOpenFlags(mode)); }); }, "ancestor");
         }
+    });
+    test("check open replacement refuses truncation", [&] {
+        std::ofstream(rootPath / "interleave") << "original";
+        maestroBeforeRestrictedOpen = replaceBeforeRestrictedOpen;
+        refused([&] { open("interleave", FileOpenFlags(FileFlags::WRITE | FileFlags::CREATE_AND_TRUNCATE_IF_EXISTS)); }, "identity changed during open");
+        require(!maestroBeforeRestrictedOpen, "interleave seam not reached");
+        require(bytes(rootPath / "interleave") == "replacement", "replacement truncated");
+        require(bytes(rootPath / "interleave-original") == "original", "original changed");
+    });
+    test("real held ancestor replacement refused on open and probe", [&] {
+        auto parent = dir / "real-parent";
+        auto held = parent / "root";
+        fs::create_directories(held);
+        std::ofstream(held / "db.lbdb") << "original";
+        auto cap = RootDirectory::open(held.string());
+        LocalFileSystem isolatedFS("db.lbdb", cap);
+        fs::rename(parent, dir / "real-parent-old");
+        fs::create_directories(held);
+        std::ofstream(held / "db.lbdb") << "replacement";
+        refused([&] { isolatedFS.openFile("db.lbdb", FileOpenFlags(FileFlags::READ_ONLY)); }, "ancestor identity");
+        refused([&] { isolatedFS.fileOrPathExists("db.lbdb"); }, "ancestor identity");
+        require(bytes(dir / "real-parent-old" / "root" / "db.lbdb") == "original", "held inode changed");
     });
     test("held ancestor replacement refused all modes and probe", [&] {
         fs::rename(dir / "parent", dir / "old-parent");
