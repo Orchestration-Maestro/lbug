@@ -1,3 +1,4 @@
+#include "common/file_system/root_directory.h"
 #include "common/file_system/virtual_file_system.h"
 
 #include <cctype>
@@ -44,9 +45,17 @@ VirtualFileSystem::VirtualFileSystem(std::string homeDir) {
     compressedFileSystem.emplace(FileCompressionType::GZIP, std::make_unique<GZipFileSystem>());
 }
 
+VirtualFileSystem::VirtualFileSystem(std::string name, std::shared_ptr<RootDirectory> root) {
+    restrictedMode = true;
+    defaultFS = std::make_unique<LocalFileSystem>(std::move(name), std::move(root));
+}
+
 VirtualFileSystem::~VirtualFileSystem() = default;
 
 void VirtualFileSystem::registerFileSystem(std::unique_ptr<FileSystem> fileSystem) {
+    if (restrictedMode) {
+        throw IOException("Restricted filesystem registerFileSystem is unsupported in E01a.");
+    }
     subSystems.push_back(std::move(fileSystem));
 }
 
@@ -59,6 +68,13 @@ FileCompressionType VirtualFileSystem::autoDetectCompressionType(const std::stri
 
 std::unique_ptr<FileInfo> VirtualFileSystem::openFile(const std::string& path, FileOpenFlags flags,
     main::ClientContext* context) {
+    if (restrictedMode) {
+        if (flags.compressionType != FileCompressionType::AUTO_DETECT &&
+            flags.compressionType != FileCompressionType::UNCOMPRESSED) {
+            throw IOException("Restricted filesystem compressed openFile is unsupported in E01a.");
+        }
+        return defaultFS->openFile(path, flags, context);
+    }
     auto compressionType = flags.compressionType;
     if (compressionType == FileCompressionType::AUTO_DETECT) {
         compressionType = autoDetectCompressionType(path);
@@ -83,6 +99,14 @@ std::vector<std::string> VirtualFileSystem::glob(main::ClientContext* context,
 
 void VirtualFileSystem::overwriteFile(const std::string& from, const std::string& to) {
     findFileSystem(from)->overwriteFile(from, to);
+}
+
+void VirtualFileSystem::copyFile(const std::string& from, const std::string& to) {
+    if (restrictedMode) {
+        defaultFS->copyFile(from, to);
+        return;
+    }
+    FileSystem::copyFile(from, to);
 }
 
 void VirtualFileSystem::renameFile(const std::string& from, const std::string& to) {
@@ -153,6 +177,7 @@ uint64_t VirtualFileSystem::getFileSize(const FileInfo& /*fileInfo*/) const {
 }
 
 FileSystem* VirtualFileSystem::findFileSystem(const std::string& path) const {
+    if (restrictedMode) { return defaultFS.get(); }
     for (auto& subSystem : subSystems) {
         if (subSystem->canHandleFile(path)) {
             return subSystem.get();

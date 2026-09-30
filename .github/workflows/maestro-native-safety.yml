@@ -2,7 +2,7 @@ name: Maestro native safety
 
 on:
   pull_request:
-    branches: [build/patched-0.20.4, build/lbug-0.20.4-cmake-reuse]
+    branches: [build/patched-0.20.4, build/lbug-0.20.4-cmake-reuse, fix/e03b-source-default]
   push:
     branches: [build/patched-0.20.4, build/lbug-0.20.4-cmake-reuse]
   workflow_dispatch:
@@ -100,3 +100,69 @@ jobs:
             ${{ runner.temp }}/source-default-red
             ${{ runner.temp }}/source-default-green
           if-no-files-found: error
+
+  native-safety:
+    name: native-safety (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: 3
+      CMAKE_BUILD_PARALLEL_LEVEL: 3
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Select the preinstalled Rust toolchain
+        shell: bash
+        run: rustup default stable
+      - name: Activate the built-in Visual Studio DeveloperShell
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $before = @{}
+          Get-ChildItem Env: | ForEach-Object { $before[$_.Name] = $_.Value }
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          $install = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          Import-Module (Join-Path $install 'Common7/Tools/Microsoft.VisualStudio.DevShell.dll')
+          Enter-VsDevShell -VsInstallPath $install -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
+          Get-ChildItem Env: | Where-Object { $before[$_.Name] -ne $_.Value } | ForEach-Object {
+            "$($_.Name)=$($_.Value)" >> $env:GITHUB_ENV
+          }
+      - name: Configure native tests from this revision
+        run: cmake -S tests/native_safety -B target/native-safety -DCMAKE_BUILD_TYPE=Release
+      - name: Build native tests
+        run: cmake --build target/native-safety --config Release --parallel 3
+      - name: Run native tests (Windows proves closed refusal)
+        run: ctest --test-dir target/native-safety --build-config Release --verbose --output-on-failure
+      - name: Rust constructor tests using the same source-built archive (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          LBUG_LIBRARY_DIR: ${{ github.workspace }}/target/native-safety/engine/src
+          LBUG_INCLUDE_DIR: ${{ github.workspace }}/lbug-src/src/include
+        run: |
+          export CXXFLAGS="-DLBUG_BUNDLED -I$PWD/target/native-safety/engine/src/include"
+          cargo test --release --locked --no-default-features native_safety_tests
+      - name: Rust constructor tests using the same archive (Windows refusal)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:LBUG_LIBRARY_DIR = "$pwd/target/native-safety/engine/src/Release"
+          $env:LBUG_INCLUDE_DIR = "$pwd/lbug-src/src/include"
+          $env:CXXFLAGS = "/DLBUG_BUNDLED /I$pwd/target/native-safety/engine/src/include"
+          cargo test --release --locked --no-default-features native_safety_tests
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Format Rust bindings
+        run: cargo fmt --check
+      - name: Native operation audit
+        shell: bash
+        run: bash scripts/audit-native-filesystem.sh > native-filesystem-audit.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: native-safety-${{ matrix.os }}-${{ github.sha }}
+          path: |
+            target/native-safety/Testing/Temporary/LastTest.log
+            native-filesystem-audit.txt

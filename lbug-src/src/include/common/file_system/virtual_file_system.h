@@ -16,6 +16,7 @@ namespace storage {
 class BufferManager;
 };
 namespace common {
+class RootDirectory;
 
 class LBUG_API VirtualFileSystem final : public FileSystem {
     friend class storage::BufferManager;
@@ -23,6 +24,7 @@ class LBUG_API VirtualFileSystem final : public FileSystem {
 public:
     VirtualFileSystem();
     explicit VirtualFileSystem(std::string homeDir);
+    VirtualFileSystem(std::string name, std::shared_ptr<RootDirectory> root);
 
     ~VirtualFileSystem() override;
 
@@ -35,6 +37,7 @@ public:
         const std::string& path) const override;
 
     void overwriteFile(const std::string& from, const std::string& to) override;
+    void copyFile(const std::string& from, const std::string& to) override;
 
     void renameFile(const std::string& from, const std::string& to) override;
 

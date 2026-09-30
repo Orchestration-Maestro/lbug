@@ -20,6 +20,7 @@
 namespace lbug {
 namespace common {
 class FileSystem;
+class RootDirectory;
 } // namespace common
 
 namespace extension {
@@ -121,6 +122,10 @@ public:
      */
     LBUG_API explicit Database(std::string_view databasePath,
         SystemConfig systemConfig = SystemConfig());
+    // Restricted projection mode: held root plus one plain disk-file name; no ambient paths.
+    LBUG_API Database(std::shared_ptr<common::RootDirectory> root, std::string_view name,
+        SystemConfig systemConfig = SystemConfig());
+    bool isRestrictedProjection() const { return rootDirectory != nullptr; }
     /**
      * @brief Destructs the database object.
      */
@@ -196,6 +201,7 @@ private:
 
 private:
     std::string databasePath;
+    std::shared_ptr<common::RootDirectory> rootDirectory;
     std::unique_ptr<DBConfig> dbConfig;
     std::unique_ptr<common::VirtualFileSystem> vfs;
     std::unique_ptr<storage::BufferManager> bufferManager;

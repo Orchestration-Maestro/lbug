@@ -5,6 +5,7 @@ use std::path::Path;
 
 use crate::error::Error;
 use crate::ffi::ffi;
+use crate::RootDirectory;
 
 /// The Database class is the main class of `LbugDB`. It manages all database components.
 pub struct Database {
@@ -135,9 +136,36 @@ impl Database {
     ///   If the path is empty, or equal to `:memory:`, the database will be created in-memory.
     /// * `config`: Database configuration to use
     pub fn new<P: AsRef<Path>>(path: P, config: SystemConfig) -> Result<Self, Error> {
+        Self::open_native(
+            &cxx::SharedPtr::null(),
+            &path.as_ref().display().to_string(),
+            config,
+        )
+    }
+
+    /// Opens a restricted projection using a held root and one plain disk-file name.
+    ///
+    /// Names cannot be empty, `.` or `..`, contain separators or NUL, or select an
+    /// in-memory database. Links, directories, aliases and identity replacement are
+    /// refused before file content access. Native operations not implemented in this
+    /// safety slice fail closed; this is not yet a qualified full projection mode.
+    pub fn new_rooted(
+        root: &RootDirectory,
+        name: &str,
+        config: SystemConfig,
+    ) -> Result<Self, Error> {
+        Self::open_native(&root.root, name, config)
+    }
+
+    fn open_native(
+        root: &cxx::SharedPtr<ffi::RootDirectory>,
+        path: &str,
+        config: SystemConfig,
+    ) -> Result<Self, Error> {
         Ok(Database {
             db: UnsafeCell::new(ffi::new_database(
-                ffi::StringView::new(&path.as_ref().display().to_string()),
+                root,
+                ffi::StringView::new(path),
                 config.buffer_pool_size,
                 config.max_num_threads,
                 config.enable_compression,

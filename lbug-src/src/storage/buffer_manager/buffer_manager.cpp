@@ -90,7 +90,7 @@ BufferManager::BufferManager(const std::string& databasePath, const std::string&
     // as /var/tmp (not /tmp since that may be backed by memory). However we also need to be able to
     // support multiple databases spilling at once (can't be the same file), and handle different
     // platforms.
-    if (!readOnly && !main::DBConfig::isDBPathInMemory(databasePath) &&
+    if (!readOnly && !vfs->isRestricted() && !main::DBConfig::isDBPathInMemory(databasePath) &&
         dynamic_cast<LocalFileSystem*>(vfs->findFileSystem(spillToDiskPath))) {
         spiller = std::make_unique<Spiller>(spillToDiskPath, *this, vfs);
     }
@@ -613,6 +613,9 @@ uint64_t BufferManager::freeUsedMemory(uint64_t size) {
 }
 
 void BufferManager::resetSpiller(std::string spillPath) {
+    if (!spillPath.empty() && vfs->isRestricted()) {
+        throw BufferManagerException("restricted spill unsupported in E01a.");
+    }
     if (spillPath.empty()) {
         // Disable spilling to disk;
         spiller = nullptr;

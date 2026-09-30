@@ -17,6 +17,7 @@
 
 #include "common/exception/exception.h"
 #include "common/file_system/virtual_file_system.h"
+#include "common/file_system/root_directory.h"
 #include "main/db_config.h"
 #include "processor/processor.h"
 #include "storage/storage_extension.h"
@@ -94,6 +95,16 @@ Database::Database(std::string_view databasePath, SystemConfig systemConfig,
     initMembers(databasePath, constructBMFunc);
 }
 
+Database::Database(std::shared_ptr<RootDirectory> root, std::string_view name,
+    SystemConfig systemConfig)
+    : rootDirectory{std::move(root)}, dbConfig{std::make_unique<DBConfig>(systemConfig)} {
+    RootDirectory::validateName(std::string(name));
+    if (!rootDirectory || DBConfig::isDBPathInMemory(std::string(name))) {
+        throw RuntimeException("Restricted database requires a root capability and disk child name.");
+    }
+    initMembers(name, initBufferManager);
+}
+
 std::unique_ptr<BufferManager> Database::initBufferManager(const Database& db) {
     return std::make_unique<BufferManager>(db.databasePath,
         StorageUtils::getTmpFilePath(db.databasePath), db.dbConfig->bufferPoolSize,
@@ -105,13 +116,25 @@ void Database::initMembers(std::string_view dbPath, construct_bm_func_t initBmFu
     // handles the home directory expansion.
     const auto dbPathStr = std::string(dbPath);
     auto clientContext = ClientContext(this);
-    databasePath = StorageUtils::expandPath(&clientContext, dbPathStr);
-    clientContext.addDBDirToFileSearchPath(databasePath);
-
-    if (std::filesystem::is_directory(databasePath)) {
-        throw RuntimeException("Database path cannot be a directory: " + databasePath);
+    if (rootDirectory) {
+        databasePath = dbPathStr;
+        // The narrow startup probe rejects a directory rather than recursively adopting it.
+        rootDirectory->probeRegularFile(databasePath);
+        if (!dbConfig->readOnly &&
+            (rootDirectory->probeRegularFile(StorageUtils::getWALFilePath(databasePath)) ||
+                rootDirectory->probeRegularFile(StorageUtils::getCheckpointWALFilePath(databasePath)) ||
+                rootDirectory->probeRegularFile(StorageUtils::getShadowFilePath(databasePath)))) {
+            throw RuntimeException("Restricted writable WAL recovery is unsupported in E01a.");
+        }
+        vfs = std::make_unique<VirtualFileSystem>(databasePath, rootDirectory);
+    } else {
+        databasePath = StorageUtils::expandPath(&clientContext, dbPathStr);
+        clientContext.addDBDirToFileSearchPath(databasePath);
+        if (std::filesystem::is_directory(databasePath)) {
+            throw RuntimeException("Database path cannot be a directory: " + databasePath);
+        }
+        vfs = std::make_unique<VirtualFileSystem>(databasePath);
     }
-    vfs = std::make_unique<VirtualFileSystem>(databasePath);
     validatePathInReadOnly();
 
     bufferManager = initBmFunc(*this);

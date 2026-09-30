@@ -53,6 +53,8 @@ public:
 
     virtual ~FileSystem() = default;
 
+    bool isRestricted() const { return restrictedMode; }
+
     virtual std::unique_ptr<FileInfo> openFile(const std::string& /*path*/, FileOpenFlags /*flags*/,
         main::ClientContext* /*context*/ = nullptr) {
         UNREACHABLE_CODE;
@@ -130,6 +132,7 @@ protected:
     static bool isGZIPCompressed(const std::filesystem::path& path);
 
     std::string dbPath;
+    bool restrictedMode = false;
 };
 
 } // namespace common

@@ -4,6 +4,7 @@ add_library(lbug_file_system
         file_info.cpp
         file_system.cpp
         local_file_system.cpp
+        root_directory.cpp
         virtual_file_system.cpp
         gzip_file_system.cpp)
 

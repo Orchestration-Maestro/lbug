@@ -24,7 +24,6 @@
 
 #include <cstring>
 
-#include "storage/storage_utils.h"
 #include <format>
 
 namespace lbug {
@@ -40,6 +39,19 @@ LocalFileInfo::~LocalFileInfo() {
         close(fd);
     }
 #endif
+}
+
+LocalFileSystem::LocalFileSystem(std::string name, std::shared_ptr<RootDirectory> root)
+    : FileSystem(std::move(name)), root{std::move(root)} {
+    if (!this->root) { throw IOException("Restricted filesystem requires a root capability."); }
+    restrictedMode = true;
+}
+
+void LocalFileSystem::requireUnrestricted(const char* operation) const {
+    if (root) {
+        throw IOException(std::string("Restricted filesystem ") + operation +
+                          " is unsupported in E01a.");
+    }
 }
 
 static void validateFileFlags(uint8_t flags) {
@@ -59,8 +71,19 @@ static void validateFileFlags(uint8_t flags) {
 
 std::unique_ptr<FileInfo> LocalFileSystem::openFile(const std::string& path, FileOpenFlags flags,
     main::ClientContext* context) {
-    auto fullPath = expandPath(context, path);
+    auto fullPath = root ? path : expandPath(context, path);
+    if (root) { RootDirectory::validateName(path); }
     auto fileFlags = flags.flags;
+    if (root) {
+        const auto create = fileFlags & FileFlags::CREATE_IF_NOT_EXISTS;
+        const auto truncate = fileFlags & FileFlags::CREATE_AND_TRUNCATE_IF_EXISTS;
+        const auto allowed = FileFlags::READ_ONLY | FileFlags::WRITE | FileFlags::CREATE_IF_NOT_EXISTS |
+                             FileFlags::CREATE_AND_TRUNCATE_IF_EXISTS | FileFlags::TEMPORARY;
+        if ((fileFlags & ~allowed) || ((create || truncate) && !(fileFlags & FileFlags::WRITE)) ||
+            (create && truncate) || !(fileFlags & (FileFlags::READ_ONLY | FileFlags::WRITE))) {
+            throw IOException("Invalid restricted openFile flags.");
+        }
+    }
     validateFileFlags(fileFlags);
 
     int openFlags = 0;
@@ -87,6 +110,9 @@ std::unique_ptr<FileInfo> LocalFileSystem::openFile(const std::string& path, Fil
     }
 
 #if defined(_WIN32)
+    if (root) {
+        throw IOException("Restricted openFile is unsupported on Windows (E02).");
+    }
     auto dwDesiredAccess = 0ul;
     int dwCreationDisposition;
     if (fileFlags & FileFlags::CREATE_IF_NOT_EXISTS) {
@@ -133,7 +159,7 @@ std::unique_ptr<FileInfo> LocalFileSystem::openFile(const std::string& path, Fil
     }
     return std::make_unique<LocalFileInfo>(fullPath, handle, this);
 #else
-    int fd = open(fullPath.c_str(), openFlags, 0644);
+    int fd = root ? root->openFile(path, openFlags) : open(fullPath.c_str(), openFlags, 0644);
     if (fd == -1) {
         throw IOException(std::format("Cannot open file {}: {}", fullPath, posixErrMessage()));
     }
@@ -147,7 +173,6 @@ std::unique_ptr<FileInfo> LocalFileSystem::openFile(const std::string& path, Fil
         int rc = fcntl(fd, F_SETLK, &fl);
         if (rc == -1) {
             int original_errno = errno;
-            close(fd);
             if (original_errno == EAGAIN || original_errno == EACCES) {
                 struct flock get_fl {};
                 memset(&get_fl, 0, sizeof get_fl);
@@ -157,6 +182,7 @@ std::unique_ptr<FileInfo> LocalFileSystem::openFile(const std::string& path, Fil
                 get_fl.l_len = 0;
                 if (fcntl(fd, F_GETLK, &get_fl) != -1) {
                     if (get_fl.l_type != F_UNLCK) {
+                        close(fd);
                         throw IOException(
                             "Could not set lock on file : " + fullPath + " (Lock is held by PID " +
                             std::to_string(get_fl.l_pid) + ")\n" +
@@ -165,6 +191,7 @@ std::unique_ptr<FileInfo> LocalFileSystem::openFile(const std::string& path, Fil
                     }
                 }
             }
+            close(fd);
             errno = original_errno;
             throw IOException("Could not set lock on file : " + fullPath +
                               " (Error: " + posixErrMessage() + ")\n" +
@@ -172,12 +199,17 @@ std::unique_ptr<FileInfo> LocalFileSystem::openFile(const std::string& path, Fil
                               "information.");
         }
     }
+    if (root && (openFlags & O_TRUNC) && ftruncate(fd, 0) != 0) {
+        close(fd);
+        throw IOException("Cannot truncate restricted file after validation and lock.");
+    }
     return std::make_unique<LocalFileInfo>(fullPath, fd, this);
 #endif
 }
 
 std::vector<std::string> LocalFileSystem::glob(main::ClientContext* context,
     const std::string& path) const {
+    requireUnrestricted("glob");
     if (path.empty()) {
         return std::vector<std::string>();
     }
@@ -218,6 +250,7 @@ std::vector<std::string> LocalFileSystem::glob(main::ClientContext* context,
 }
 
 void LocalFileSystem::renameFile(const std::string& from, const std::string& to) {
+    requireUnrestricted("renameFile");
     std::error_code ec;
     std::filesystem::rename(from, to, ec);
     if (ec) {
@@ -227,6 +260,7 @@ void LocalFileSystem::renameFile(const std::string& from, const std::string& to)
 }
 
 void LocalFileSystem::overwriteFile(const std::string& from, const std::string& to) {
+    requireUnrestricted("overwriteFile");
     if (!fileOrPathExists(from) || !fileOrPathExists(to)) {
         return;
     }
@@ -241,6 +275,7 @@ void LocalFileSystem::overwriteFile(const std::string& from, const std::string& 
 }
 
 void LocalFileSystem::copyFile(const std::string& from, const std::string& to) {
+    requireUnrestricted("copyFile");
     if (!fileOrPathExists(from)) {
         return;
     }
@@ -254,6 +289,7 @@ void LocalFileSystem::copyFile(const std::string& from, const std::string& to) {
 }
 
 void LocalFileSystem::createDir(const std::string& dir) const {
+    requireUnrestricted("createDir");
     try {
         auto directoryToCreate = dir;
         if (directoryToCreate.ends_with('/')
@@ -335,6 +371,7 @@ static bool isExtensionFile(const main::ClientContext* context, const std::strin
 
 void LocalFileSystem::removeFileIfExists(const std::string& path,
     const main::ClientContext* context) {
+    requireUnrestricted("removeFileIfExists");
     if (!isAllowedDeletionPath(path, dbPath) && !isExtensionFile(context, path)) {
         throw IOException(std::format(
             "Error: Path {} is not within the allowed list of files to be removed.", path));
@@ -358,6 +395,7 @@ void LocalFileSystem::removeFileIfExists(const std::string& path,
 }
 
 bool LocalFileSystem::fileOrPathExists(const std::string& path, main::ClientContext* /*context*/) {
+    if (root) { return root->probeRegularFile(path); }
     return std::filesystem::exists(path);
 }
 
@@ -392,6 +430,7 @@ bool LocalFileSystem::fileExists(const std::string& filename) {
 
 std::string LocalFileSystem::expandPath(main::ClientContext* context,
     const std::string& path) const {
+    requireUnrestricted("expandPath");
     auto fullPath = path;
     if (path.starts_with('~')) {
         fullPath =
