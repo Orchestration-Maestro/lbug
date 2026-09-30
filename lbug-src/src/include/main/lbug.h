@@ -1,5 +1,7 @@
 #pragma once
 
+#include "common/file_system/root_directory.h" // IWYU pragma: export
+
 #include "common/types/date_t.h"              // IWYU pragma: export
 #include "common/types/dtime_t.h"             // IWYU pragma: export
 #include "common/types/int128_t.h"            // IWYU pragma: export

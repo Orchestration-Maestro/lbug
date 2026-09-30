@@ -2,6 +2,8 @@ use crate::logical_type::LogicalType;
 use std::fmt;
 
 pub enum Error {
+    /// The root path cannot be represented losslessly as UTF-8.
+    InvalidRootPath,
     /// Exception raised by C++ lbug library
     CxxException(cxx::Exception),
     /// Message produced by lbug when a query fails
@@ -19,6 +21,7 @@ pub enum Error {
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Error::InvalidRootPath => write!(f, "Restricted root path must be valid UTF-8"),
             Error::CxxException(cxx) => write!(f, "{cxx}"),
             Error::FailedQuery(message) => write!(f, "Query execution failed: {message}"),
             Error::FailedPreparedStatement(message) => {

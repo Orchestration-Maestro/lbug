@@ -115,7 +115,10 @@ inline lbug::common::LogicalTypeID logical_type_get_logical_type_id(
 }
 
 /* Database */
-std::unique_ptr<lbug::main::Database> new_database(std::string_view databasePath,
+std::shared_ptr<lbug::common::RootDirectory> open_root_directory(std::string_view path);
+std::unique_ptr<lbug::main::Database> new_database(
+    const std::shared_ptr<lbug::common::RootDirectory>& root,
+    std::string_view databasePath,
     uint64_t bufferPoolSize, uint64_t maxNumThreads, bool enableCompression, bool readOnly,
     uint64_t maxDBSize, bool autoCheckpoint, int64_t checkpointThreshold,
     bool throwOnWalReplayFailure, bool enableChecksums, bool enableMultiWrites);

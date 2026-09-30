@@ -72,6 +72,7 @@ pub use logical_type::LogicalType;
 #[cfg(feature = "arrow")]
 pub use query_result::{ArrowIterator, CsrResult};
 pub use query_result::{CSVOptions, QueryResult};
+pub use root_directory::RootDirectory;
 pub use value::{InternalID, NodeVal, RelVal, Value};
 
 mod connection;
@@ -80,7 +81,11 @@ mod error;
 mod ffi;
 mod logical_type;
 mod query_result;
+mod root_directory;
 mod value;
+
+#[cfg(test)]
+mod native_safety_tests;
 
 /// The version of the Lbug crate as reported by Cargo's `CARGO_PKG_VERSION` environment variable
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

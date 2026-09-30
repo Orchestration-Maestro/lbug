@@ -3,6 +3,7 @@
 #include <vector>
 
 #include "file_system.h"
+#include "root_directory.h"
 
 namespace lbug {
 namespace common {
@@ -28,6 +29,7 @@ struct LocalFileInfo final : FileInfo {
 class LBUG_API LocalFileSystem final : public FileSystem {
 public:
     explicit LocalFileSystem(std::string homeDir) : FileSystem(std::move(homeDir)) {}
+    LocalFileSystem(std::string name, std::shared_ptr<RootDirectory> root);
 
     std::unique_ptr<FileInfo> openFile(const std::string& path, FileOpenFlags flags,
         main::ClientContext* context = nullptr) override;
@@ -70,6 +72,10 @@ protected:
     void truncate(FileInfo& fileInfo, uint64_t size) const override;
 
     uint64_t getFileSize(const FileInfo& fileInfo) const override;
+
+private:
+    void requireUnrestricted(const char* operation) const;
+    std::shared_ptr<RootDirectory> root;
 };
 
 } // namespace common

@@ -156,9 +156,13 @@ pub(crate) mod ffi {
     unsafe extern "C++" {
         #[namespace = "lbug::main"]
         type Database;
+        #[namespace = "lbug::common"]
+        type RootDirectory;
+        fn open_root_directory(path: StringView) -> Result<SharedPtr<RootDirectory>>;
 
         #[allow(clippy::fn_params_excessive_bools)]
         fn new_database(
+            root: &SharedPtr<RootDirectory>,
             databasePath: StringView,
             bufferPoolSize: u64,
             maxNumThreads: u64,

@@ -71,8 +71,12 @@ std::unique_ptr<std::vector<lbug::common::LogicalType>> logical_type_get_struct_
     return std::make_unique<std::vector<LogicalType>>(std::move(result));
 }
 
-std::unique_ptr<Database> new_database(std::string_view databasePath, uint64_t bufferPoolSize,
-    uint64_t maxNumThreads, bool enableCompression, bool readOnly, uint64_t maxDBSize,
+std::shared_ptr<lbug::common::RootDirectory> open_root_directory(std::string_view path) {
+    return lbug::common::RootDirectory::open(std::string(path));
+}
+
+std::unique_ptr<Database> new_database(const std::shared_ptr<lbug::common::RootDirectory>& root,
+    std::string_view databasePath, uint64_t bufferPoolSize, uint64_t maxNumThreads, bool enableCompression, bool readOnly, uint64_t maxDBSize,
     bool autoCheckpoint, int64_t checkpointThreshold, bool throwOnWalReplayFailure,
     bool enableChecksums, bool enableMultiWrites) {
     auto systemConfig = SystemConfig();
@@ -94,6 +98,7 @@ std::unique_ptr<Database> new_database(std::string_view databasePath, uint64_t b
     systemConfig.throwOnWalReplayFailure = throwOnWalReplayFailure;
     systemConfig.enableChecksums = enableChecksums;
     systemConfig.enableMultiWrites = enableMultiWrites;
+    if (root) { return std::make_unique<Database>(root, databasePath, systemConfig); }
     return std::make_unique<Database>(databasePath, systemConfig);
 }
 

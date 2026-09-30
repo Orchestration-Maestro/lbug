@@ -12,6 +12,9 @@ void FileSystem::overwriteFile(const std::string& /*from*/, const std::string& /
 }
 
 void FileSystem::renameFile(const std::string& from, const std::string& to) {
+    if (restrictedMode) {
+        throw IOException("Restricted filesystem renameFile is unsupported in E01a.");
+    }
     std::error_code ec;
     std::filesystem::rename(from, to, ec);
     if (ec) {
