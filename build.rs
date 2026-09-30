@@ -207,7 +207,15 @@ fn reused_cmake_dir(lbug_root: &Path) -> Option<PathBuf> {
         cfg!(feature = "extension_installer")
     );
     for var in [
-        "TARGET", "HOST", "PROFILE", "OPT_LEVEL", "DEBUG", "CC", "CXX", "CFLAGS", "CXXFLAGS",
+        "TARGET",
+        "HOST",
+        "PROFILE",
+        "OPT_LEVEL",
+        "DEBUG",
+        "CC",
+        "CXX",
+        "CFLAGS",
+        "CXXFLAGS",
     ] {
         println!("cargo:rerun-if-env-changed={var}");
         shape.push('|');
@@ -241,7 +249,9 @@ fn remove_objects(dir: &Path) {
 fn build_bundled_cmake() -> Vec<PathBuf> {
     let lbug_root = get_lbug_root();
     let reused_dir = reused_cmake_dir(&lbug_root);
-    let finished = reused_dir.as_ref().map(|dir| dir.join("lbug-build-finished"));
+    let finished = reused_dir
+        .as_ref()
+        .map(|dir| dir.join("lbug-build-finished"));
 
     let mut build = cmake::Config::new(&lbug_root);
     if let Some(dir) = &reused_dir {
