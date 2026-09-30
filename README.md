@@ -1,8 +1,8 @@
 # lbug, patched for Maestro
 
 This repository carries [`lbug`](https://crates.io/crates/lbug), the Rust
-binding of [LadybugDB](https://github.com/LadybugDB/ladybug), with one small
-patch that Maestro needs. The code is upstream's, under its MIT licence
+binding of [LadybugDB](https://github.com/LadybugDB/ladybug), with the
+patches that Maestro needs. The code is upstream's, under its MIT licence
 (`LICENSE`); bundled third-party sources keep their own licences under
 `lbug-src/third_party`.
 
@@ -61,6 +61,28 @@ whenever the fingerprint of the crate changes: other features, other
   registry or git checkout).
 - `liblbug` links `-bundle`: a debug archive is 2.6 GB, and bundling copied
   it into every rlib of the crate, with about 7 GB of memory.
+
+## Source-default builds
+
+The fork builds bundled C++ by default, including for external consumers.
+Automatic prebuilt and source downloaders have been removed; missing local
+sources fail rather than fetch. Existing explicit local source/library
+paths and the `DOCS_RS` no-link accommodation remain supported. No-link
+lint/docs artifacts are not release or runtime evidence.
+
+Run the cold, external consumer regression with Python 3.12 or newer:
+
+```sh
+python scripts/test_source_default.py --evidence /tmp/source-default-evidence
+```
+
+The fixture pre-fetches locked Rust dependencies into a fresh Cargo home,
+then builds outside this repository with all `LBUG_*`/`DOCS_RS` variables
+unset, an empty native target and an HTTP(S) proxy that denies and counts
+connections. It requires zero attempts, bundled CMake compilation and a
+linked `RETURN 1` query. Transcripts and counters are retained; temporary
+sources and outputs are deleted. Fork CI runs a historical-downloader red
+control plus this green proof on Linux, macOS and Windows.
 
 ## Moving to a new upstream version
 

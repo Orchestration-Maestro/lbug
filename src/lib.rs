@@ -22,20 +22,17 @@
 //! ```
 //! ## Building
 //!
-//! By default, the build downloads a precompiled static `liblbug` archive and links it into this
-//! crate. If a precompiled archive is unavailable, the Lbug C++ library will be compiled from
-//! source and statically linked.
+//! By default, the bundled Lbug C++ library is compiled from source and statically linked.
+//! The build never downloads a precompiled library or a missing source tree.
 //!
 //! If you want to instead link against a pre-built version of the library, the following environment
 //! variables can be used to configure the build process:
 //!
 //! - `LBUG_SHARED`: If set, link dynamically instead of statically
-//! - `LBUG_SOURCE_DIR`: Directory of a Lbug source checkout to use when falling back to a source
-//!   build. Defaults to `../ladybug` when present.
+//! - `LBUG_SOURCE_DIR`: Directory of a local Lbug source checkout. Otherwise use `../ladybug`
+//!   when present, or the bundled `lbug-src`. Missing sources cause a build failure.
 //! - `LBUG_INCLUDE_DIR`: Directory of Lbug's headers
 //! - `LBUG_LIBRARY_DIR`: Directory containing Lbug's pre-built libraries.
-//! - `LBUG_BUILD_FROM_SOURCE` or `LBUG_RUST_BUILD_FROM_SOURCE`: If set, skip downloading a
-//!   precompiled `liblbug` and build from source.
 //!
 //! Example:
 //! ```bash
@@ -90,8 +87,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The source of the linked Lbug library selected by the build script.
 ///
 /// This is `external` when `LBUG_LIBRARY_DIR`/`LBUG_INCLUDE_DIR` were supplied, `source` when the
-/// bundled C++ source was built, or a value such as `run:LadybugDB/ladybug/25646256977` or
-/// `release:LadybugDB/ladybug/v0.17.0` when a precompiled archive was downloaded.
+/// C++ source was built. No precompiled archives are downloaded.
 pub const LBUG_LIBRARY_SOURCE: &str = env!("LBUG_PRECOMPILED_SOURCE");
 /// The directory containing the linked precompiled Lbug library, if one was used.
 pub const LBUG_LIBRARY_DIR: &str = env!("LBUG_PRECOMPILED_LIBRARY_DIR");

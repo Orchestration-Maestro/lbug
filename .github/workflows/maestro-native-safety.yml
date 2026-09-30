@@ -1,0 +1,102 @@
+name: Maestro native safety
+
+on:
+  pull_request:
+    branches: [build/patched-0.20.4, build/lbug-0.20.4-cmake-reuse]
+  push:
+    branches: [build/patched-0.20.4, build/lbug-0.20.4-cmake-reuse]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  source-default:
+    name: source-default (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: 3
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Select the preinstalled Rust toolchain
+        shell: bash
+        run: rustup default stable
+      - name: Activate the built-in Visual Studio DeveloperShell
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $before = @{}
+          Get-ChildItem Env: | ForEach-Object { $before[$_.Name] = $_.Value }
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          $install = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          Import-Module (Join-Path $install 'Common7/Tools/Microsoft.VisualStudio.DevShell.dll')
+          Enter-VsDevShell -VsInstallPath $install -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
+          Get-ChildItem Env: | Where-Object { $before[$_.Name] -ne $_.Value } | ForEach-Object {
+            "$($_.Name)=$($_.Value)" >> $env:GITHUB_ENV
+          }
+      - name: Check the explicit lint-only no-link accommodation
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          DOCS_RS: '1'
+          LBUG_PRECOMPILED_SOURCE: lint-only
+          LBUG_PRECOMPILED_LIBRARY_DIR: ''
+        run: cargo check --locked --no-default-features --all-targets
+      - name: Check the explicit lint-only no-link accommodation on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          DOCS_RS: '1'
+          LBUG_PRECOMPILED_SOURCE: lint-only
+          LBUG_PRECOMPILED_LIBRARY_DIR: ''
+        run: cargo check --locked --no-default-features --all-targets
+      - name: Prove the historical downloader trips the network trap
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git worktree add --detach "$RUNNER_TEMP/lbug-downloader-control" 575d94fbd1afc4fbebe5a9a2332c6be0d9dcdc49
+          if python scripts/test_source_default.py --repository "$RUNNER_TEMP/lbug-downloader-control" --evidence "$RUNNER_TEMP/source-default-red"; then
+            echo "Historical downloader unexpectedly passed"
+            exit 1
+          fi
+          python -c 'import os,pathlib; p=pathlib.Path(os.environ["RUNNER_TEMP"])/"source-default-red/attempt-count.txt"; assert int(p.read_text()) > 0'
+      - name: Prove the historical downloader trips the network trap on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $control = Join-Path $env:RUNNER_TEMP 'lbug-downloader-control'
+          $evidence = Join-Path $env:RUNNER_TEMP 'source-default-red'
+          git worktree add --detach $control 575d94fbd1afc4fbebe5a9a2332c6be0d9dcdc49
+          if ($LASTEXITCODE -ne 0) { throw 'Could not create historical control' }
+          python scripts/test_source_default.py --repository $control --evidence $evidence
+          if ($LASTEXITCODE -eq 0) { throw 'Historical downloader unexpectedly passed' }
+          python -c 'import os,pathlib; p=pathlib.Path(os.environ["RUNNER_TEMP"])/"source-default-red/attempt-count.txt"; assert int(p.read_text()) > 0'
+          if ($LASTEXITCODE -ne 0) { throw 'Historical downloader did not trip the network trap' }
+      - name: Build and run an external source-default consumer
+        if: runner.os != 'Windows'
+        shell: bash
+        run: python scripts/test_source_default.py --evidence "$RUNNER_TEMP/source-default-green"
+      - name: Build and run an external source-default consumer on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: python scripts/test_source_default.py --evidence "$env:RUNNER_TEMP/source-default-green"
+      - name: Keep transcripts and network attempt counters
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: source-default-${{ matrix.os }}-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/source-default-red
+            ${{ runner.temp }}/source-default-green
+          if-no-files-found: error

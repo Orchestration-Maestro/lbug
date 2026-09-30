@@ -17,7 +17,6 @@ version = "0.20.4"
 build = "build.rs"
 include = [
     "build.rs",
-    "/scripts",
     "/src",
     "/include",
     "/lbug-src/src",
