@@ -3,6 +3,24 @@ project(MaestroNativeSafety LANGUAGES CXX C)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(MAESTRO_WINDOWS_PROBE_ONLY "Build only the standalone E02a Windows SDK probe" OFF)
+if(WIN32)
+    add_executable(maestro_windows_security windows_security.cpp
+        ../../lbug-src/src/common/file_system/root_directory_windows_security.cpp
+        ../../lbug-src/src/common/exception/exception.cpp)
+    target_include_directories(maestro_windows_security PRIVATE
+        ../../lbug-src/src/include ../../lbug-src/src/common/file_system)
+    target_compile_definitions(maestro_windows_security PRIVATE
+        MAESTRO_WINDOWS_SECURITY_TEST LBUG_STATIC_DEFINE _WIN32_WINNT=0x0A00 WINVER=0x0A00)
+    target_link_libraries(maestro_windows_security PRIVATE advapi32)
+    enable_testing()
+    # Only the focused workflow executes security tests: all live handles must be
+    # opened by its verified standard-user child, not the full-engine admin runner.
+    if(MAESTRO_WINDOWS_PROBE_ONLY)
+        add_test(NAME maestro_windows_security COMMAND maestro_windows_security
+            "${CMAKE_CURRENT_BINARY_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/windows-private-root-v1.tsv")
+        set_tests_properties(maestro_windows_security PROPERTIES TIMEOUT 120)
+    endif()
+endif()
 if(MAESTRO_WINDOWS_PROBE_ONLY)
     if(NOT WIN32)
         message(FATAL_ERROR "MAESTRO_WINDOWS_PROBE_ONLY requires the Windows SDK")

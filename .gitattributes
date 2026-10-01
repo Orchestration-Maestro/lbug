@@ -1,0 +1,2 @@
+# The shared contract fixture is byte-identical on every host.
+tests/native_safety/windows-private-root-v1.tsv text eol=lf

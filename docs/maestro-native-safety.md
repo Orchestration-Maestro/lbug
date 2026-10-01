@@ -262,3 +262,46 @@ On Linux, `maestro_rooted_sidecars` uses `-Wl,--wrap=fsync` to observe the actua
 call, verify its descriptor's dev/ino, return EIO there (the pre-call hook succeeds), and prove
 permanent refusal including an already-held WAL handle. The three-OS workflow runs the native
 and Rust suites; Windows still proves refusal.
+
+## Windows owner/DACL boundary (E02b)
+
+`maestro-private-root/1` is an integrity predicate, not a grant of access or a
+Windows rooted-open implementation. E02b does not change any open path: writable
+and read-only rooted Windows construction remain closed until their own slices.
+The private native validators query held handles without modifying permissions.
+They require the process primary TokenUser owner, reject thread impersonation and
+all security/token/control/ACE-query failures, require a present non-null DACL,
+and protect the application root from inherited ACL propagation (`D:P`). Each
+child's owner and actual ACL are checked against the validated root; ancestors
+above that root need held identity/no-delete-sharing protection, not private ACLs.
+
+Only ordinary allow/deny ACEs with OI/CI/NP/IO/ID flags and known file/generic masks
+are supported. Mutating grants, including inherit-only grants, may name only the
+user, SYSTEM or Administrators. Deny entries do not cancel an unsafe allow.
+CREATOR OWNER allow entries are permitted only inherit-only on directories with
+an inheritance target. Nonmutating reads for other principals and empty DACLs
+pass this predicate; an empty DACL still need not permit ordinary I/O. No ACL is
+repaired. Trusted-principal ACL changes and same-user external mutation remain
+outside the integrity boundary.
+
+The shared dependency-free fixture is
+`tests/native_safety/windows-private-root-v1.tsv`: **190 SDDL cases**, SHA-256
+`fc2cc9f0f21bf26df6f56beadb9e6e80f8712489b26545d74c13f93010a4b46d`.
+V26 expands all ten mutation masks over four untrusted principals and three roles;
+V23/V24 cross allow/deny object/callback types with effective/inherit-only flags.
+Every row checks decoded ACE types/flags/masks before invoking the production
+bounded descriptor evaluator; failed SDDL setup never counts as refusal. The
+Windows-only seam is compiled solely into `maestro_windows_security`, not the
+engine. Non-SDDL invalid buffers/API results and synthetic foreign owners are
+separate from standard-user live `GetSecurityInfo` acceptance/refusal fixtures.
+The latter check protected-root inheritance against a changed broad parent,
+unsafe writes, unreadable handles, root protection and real impersonation, with
+outside bytes/file ID/volume/link and directory-listing invariants.
+
+The focused Windows workflow runs all five security groups and four isolated
+owner/null-DACL/writable-ACE/query-failure mutants, rebuilds after each restore,
+and executes both probe and security CTest entries as its verified standard-user
+child. The six full-engine/source-default jobs remain unchanged; they compile
+this boundary on Windows but do not run live ACL fixtures as an administrator.
+E02c owns capability ancestry/no-follow integration. E02a's namespace-durability
+verdict remains NO; this boundary does not authorize writable Windows support.
