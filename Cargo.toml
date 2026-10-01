@@ -97,6 +97,9 @@ version = "1"
 [build-dependencies.libc]
 version = "0.2"
 
+[build-dependencies.shlex]
+version = "2.0.1"
+
 [build-dependencies.sha2]
 version = "0.11"
 default-features = false

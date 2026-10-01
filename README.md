@@ -74,9 +74,13 @@ because cache ownership cannot be verified with the existing dependencies.
 The SHA-256 key covers native source contents, target, compiler/toolchain
 identities, profile, flags and features. Successful engine libraries and generated
 headers are synced and published atomically with a SHA-256 manifest. Per-target
-cxx bridges are not cached. External CMake/toolchain/include-file inputs bypass
-the cache rather than guess their identity; the single input declaration and
-bypass classification live in `build_support/build_env.rs`. Unsupported atomic
+cxx bridges are not cached. Cache reads and publication use held, checked directory
+handles and no-follow opens; verified artifacts are copied into target-owned
+`OUT_DIR` before linking, so replacing a cache pathname cannot change link inputs.
+External CMake/toolchain/search roots and file-loading flags bypass the cache.
+Only recognized scalar flag families are keyed; unknown flags and path-bearing
+values also bypass. The environment declaration is in `build_support/build_env.rs`
+and the scalar flag table is in `build_support/cache_key.rs`. Unsupported atomic
 no-replace publication keeps a private complete output, never replaces an entry.
 
 Unset the variable for the original source-build behavior. The legacy
@@ -88,7 +92,7 @@ Run the counted miniature-engine cases and real-engine measurements:
 
 ```sh
 cargo test --locked --manifest-path tests/native-cache/Cargo.toml -- --test-threads=1
-python tests/native-cache/test_build_environment.py --evidence /tmp/build-environment
+python tests/native-cache/test_ci_preparation.py --evidence /tmp/build-environment
 python scripts/test_native_cache.py --evidence /tmp/native-cache
 ```
 

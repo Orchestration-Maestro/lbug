@@ -66,11 +66,7 @@ jobs:
         run: |
           set -euo pipefail
           git worktree add --detach "$RUNNER_TEMP/lbug-downloader-control" 575d94fbd1afc4fbebe5a9a2332c6be0d9dcdc49
-          if python scripts/test_source_default.py --repository "$RUNNER_TEMP/lbug-downloader-control" --evidence "$RUNNER_TEMP/source-default-red"; then
-            echo "Historical downloader unexpectedly passed"
-            exit 1
-          fi
-          python -c 'import os,pathlib; p=pathlib.Path(os.environ["RUNNER_TEMP"])/"source-default-red/attempt-count.txt"; assert int(p.read_text()) > 0'
+          python tests/source-default/test_historical_control.py --repository "$RUNNER_TEMP/lbug-downloader-control" --evidence "$RUNNER_TEMP/source-default-red"
       - name: Prove the historical downloader trips the network trap on Windows
         if: runner.os == 'Windows'
         shell: pwsh
@@ -79,9 +75,7 @@ jobs:
           $evidence = Join-Path $env:RUNNER_TEMP 'source-default-red'
           git worktree add --detach $control 575d94fbd1afc4fbebe5a9a2332c6be0d9dcdc49
           if ($LASTEXITCODE -ne 0) { throw 'Could not create historical control' }
-          python scripts/test_source_default.py --repository $control --evidence $evidence
-          if ($LASTEXITCODE -eq 0) { throw 'Historical downloader unexpectedly passed' }
-          python -c 'import os,pathlib; p=pathlib.Path(os.environ["RUNNER_TEMP"])/"source-default-red/attempt-count.txt"; assert int(p.read_text()) > 0'
+          python tests/source-default/test_historical_control.py --repository $control --evidence $evidence
           if ($LASTEXITCODE -ne 0) { throw 'Historical downloader did not trip the network trap' }
       - name: Build and run an external source-default consumer
         if: runner.os != 'Windows'
@@ -233,9 +227,9 @@ jobs:
           Get-ChildItem Env: | Where-Object { $before[$_.Name] -ne $_.Value } | ForEach-Object {
             "$($_.Name)=$($_.Value)" >> $env:GITHUB_ENV
           }
-      - name: Prove E01b library-directory freshness and complete environment tracking
+      - name: Prove locked prefetch precedes offline library-directory freshness checks
         shell: bash
-        run: python tests/native-cache/test_build_environment.py --evidence "$RUNNER_TEMP/native-cache/build-environment"
+        run: python tests/native-cache/test_ci_preparation.py --evidence "$RUNNER_TEMP/native-cache/build-environment"
       - name: Prove the standard runner environment never triggers an arbitrary-file bypass
         shell: bash
         run: |
@@ -243,9 +237,17 @@ jobs:
           mkdir -p "$RUNNER_TEMP/native-cache"
           cargo test --locked --manifest-path tests/native-cache/Cargo.toml two_target_directories_reuse_complete_output -- --test-threads=1 --nocapture 2>&1 | tee "$RUNNER_TEMP/native-cache/normal-environment.log"
           python - <<'PY'
+          import json
           import os
+          import re
           from pathlib import Path
-          text = (Path(os.environ['RUNNER_TEMP']) / 'native-cache/normal-environment.log').read_text()
+          evidence = Path(os.environ['RUNNER_TEMP']) / 'native-cache'
+          names = {'CFLAGS', 'CXXFLAGS', 'CPPFLAGS', 'ASMFLAGS', 'LDFLAGS', 'ARFLAGS', 'RANLIBFLAGS', 'CC_SHELL_ESCAPED_FLAGS'}
+          names.update(name for name in os.environ if re.match(r'(?:(?:HOST|TARGET)_)?(?:C|CXX|CPP|ASM|LD|AR|RANLIB)FLAGS(?:$|_)', name))
+          flags = {name: os.environ.get(name) for name in sorted(names)}
+          (evidence / 'normal-flag-inputs.json').write_text(json.dumps(flags, indent=2) + '\n')
+          print('Standard runner flag inputs: ' + json.dumps(flags))
+          text = (evidence / 'normal-environment.log').read_text()
           assert 'native-cache environment:' in text, 'missing per-variable presence table'
           assert 'native cache disabled by ' not in text, 'standard runner triggered an arbitrary-file bypass'
           if os.environ['RUNNER_OS'] == 'Windows':

@@ -1,12 +1,11 @@
 use crate::build_env as env;
-use sha2::{Digest, Sha256};
 #[cfg(unix)]
-use std::{ffi::OsStr, process::Command};
-use std::{
-    fs, io,
-    path::{Path, PathBuf},
-};
+use sha2::{Digest, Sha256};
+use std::path::Path;
+#[cfg(unix)]
+use std::{ffi::OsStr, fs, io, path::PathBuf, process::Command};
 
+#[cfg(unix)]
 fn hex(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
     bytes
@@ -26,6 +25,7 @@ fn field(hash: &mut Sha256, bytes: &[u8]) {
     hash.update(bytes);
 }
 
+#[cfg(unix)]
 pub(super) fn digest_file(path: &Path) -> io::Result<String> {
     let mut file = fs::File::open(path)?;
     let mut hash = Sha256::new();
@@ -40,6 +40,7 @@ pub(super) fn digest_file(path: &Path) -> io::Result<String> {
     Ok(hex(&hash.finalize()))
 }
 
+#[cfg(unix)]
 pub(super) fn files(root: &Path) -> io::Result<Vec<PathBuf>> {
     fn visit(root: &Path, dir: &Path, paths: &mut Vec<PathBuf>) -> io::Result<()> {
         for entry in fs::read_dir(dir)? {
@@ -131,6 +132,7 @@ pub(super) fn key(root: &Path) -> io::Result<String> {
     field(&mut hash, b"lbug-native-cache-v1");
     field(&mut hash, include_bytes!("../build.rs"));
     field(&mut hash, include_bytes!("native_cache.rs"));
+    field(&mut hash, include_bytes!("cache_dir.rs"));
     field(&mut hash, include_bytes!("cache_key.rs"));
     field(&mut hash, include_bytes!("build_env.rs"));
     field(&mut hash, include_bytes!("../Cargo.lock"));
@@ -194,6 +196,102 @@ pub(super) fn key(root: &Path) -> io::Result<String> {
     Ok(hex(&hash.finalize()))
 }
 
+fn file_loading_flags(value: &str) -> bool {
+    // Match cc::Build::envflags and get_env_boolean, including ASCII-only
+    // whitespace when shell escaping is off. No second, approximate parser.
+    let shell = env::var_os("CC_SHELL_ESCAPED_FLAGS").is_some_and(|value| {
+        !value.is_empty() && value != "0" && value != "no" && value != "false"
+    });
+    if shell {
+        let mut tokens = shlex::Shlex::new(value);
+        let loads = tokens.any(|flag| file_loading_flag(&flag));
+        loads || tokens.had_error
+    } else {
+        value.split_ascii_whitespace().any(file_loading_flag)
+    }
+}
+
+enum ScalarRule {
+    Macro,
+    Optimization,
+    Debug,
+    Standard,
+    Warning,
+    Exact,
+}
+
+// Only bounded scalar families may be keyed. Unknown switches, positional
+// files, response files and path-bearing options bypass instead of guessing.
+// These include the fixture and ordinary native hardening/PIC/ABI flags;
+// E04's Rust coverage/mutation flags are separately keyed in native_names.
+const SCALAR_FLAGS: &[(&str, ScalarRule)] = &[
+    ("-D", ScalarRule::Macro),
+    ("-U", ScalarRule::Macro),
+    ("-O", ScalarRule::Optimization),
+    ("-g", ScalarRule::Debug),
+    ("-std=", ScalarRule::Standard),
+    ("-W", ScalarRule::Warning),
+    ("-fPIC", ScalarRule::Exact),
+    ("-fpic", ScalarRule::Exact),
+    ("-fPIE", ScalarRule::Exact),
+    ("-fpie", ScalarRule::Exact),
+    ("-fexceptions", ScalarRule::Exact),
+    ("-fno-exceptions", ScalarRule::Exact),
+    ("-frtti", ScalarRule::Exact),
+    ("-fno-rtti", ScalarRule::Exact),
+    ("-fomit-frame-pointer", ScalarRule::Exact),
+    ("-fno-omit-frame-pointer", ScalarRule::Exact),
+    ("-fstack-protector", ScalarRule::Exact),
+    ("-fstack-protector-strong", ScalarRule::Exact),
+    ("-fstack-protector-all", ScalarRule::Exact),
+    ("-fstrict-aliasing", ScalarRule::Exact),
+    ("-fno-strict-aliasing", ScalarRule::Exact),
+    ("-fvisibility=hidden", ScalarRule::Exact),
+    ("-m32", ScalarRule::Exact),
+    ("-m64", ScalarRule::Exact),
+    ("-pthread", ScalarRule::Exact),
+];
+
+fn file_loading_flag(flag: &str) -> bool {
+    !SCALAR_FLAGS.iter().any(|(prefix, rule)| {
+        let Some(suffix) = flag.strip_prefix(prefix) else {
+            return false;
+        };
+        match rule {
+            ScalarRule::Macro => !suffix.is_empty() && !suffix.contains(['/', '\\', '@']),
+            ScalarRule::Optimization => {
+                ["", "0", "1", "2", "3", "s", "z", "g", "fast"].contains(&suffix)
+            }
+            ScalarRule::Debug => [
+                "",
+                "0",
+                "1",
+                "2",
+                "3",
+                "line-tables-only",
+                "dwarf-2",
+                "dwarf-3",
+                "dwarf-4",
+                "dwarf-5",
+            ]
+            .contains(&suffix),
+            ScalarRule::Standard => {
+                !suffix.is_empty()
+                    && suffix
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-')
+            }
+            ScalarRule::Warning => {
+                !suffix.is_empty()
+                    && suffix
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '=')
+            }
+            ScalarRule::Exact => suffix.is_empty(),
+        }
+    })
+}
+
 /// Files loaded outside the source tree cannot be bounded by this key. Fail
 /// closed instead of treating an arbitrary CMake/response file as a flag value.
 pub(super) fn bypass() -> Option<String> {
@@ -216,29 +314,7 @@ pub(super) fn bypass() -> Option<String> {
             continue;
         };
         let value = value.to_string_lossy();
-        if env::is_flag(&name)
-            && value.split_whitespace().any(|flag| {
-                flag.starts_with('@')
-                    || [
-                        "-include",
-                        "-imacros",
-                        "-I",
-                        "-isystem",
-                        "-iquote",
-                        "--sysroot",
-                        "-isysroot",
-                        "-fplugin",
-                        "-specs",
-                        "--specs",
-                        "--config",
-                        "-ivfsoverlay",
-                        "-fprofile-use",
-                        "-Xclang",
-                    ]
-                    .iter()
-                    .any(|prefix| flag.starts_with(prefix))
-            })
-        {
+        if env::is_flag(&name) && file_loading_flags(&value) {
             return Some(name);
         }
         if env::is_command(&name)

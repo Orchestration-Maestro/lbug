@@ -36,6 +36,14 @@ def main():
         env = os.environ.copy()
         env.update(DOCS_RS="1", CARGO_BUILD_JOBS="3", CARGO_TARGET_DIR=str(root / "target"))
 
+        # This fixture starts with a cold CARGO_HOME on CI. Fetch the exact lock
+        # before any offline check; all freshness runs below remain offline.
+        command = cargo + ["fetch", "--locked", "--manifest-path", str(fixture / "Cargo.toml")]
+        with (evidence / "prefetch.log").open("w") as log:
+            log.write("Command: " + repr(command) + "\n")
+            log.flush()
+            subprocess.run(command, env=env, stdout=log, stderr=subprocess.STDOUT, check=True)
+
         def run(name):
             command = cargo + ["check", "--locked", "--offline", "-vv", "--manifest-path", str(fixture / "Cargo.toml")]
             with (evidence / f"{name}.log").open("w") as log:

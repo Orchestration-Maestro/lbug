@@ -42,11 +42,9 @@ fn link_openssl() {
     {
         if output.status.success() {
             let lib_dir = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !lib_dir.is_empty() {
-                let path = PathBuf::from(&lib_dir);
-                if path.is_dir() {
-                    println!("cargo:rustc-link-search=native={}", path.display());
-                }
+            let path = PathBuf::from(&lib_dir);
+            if path.is_dir() {
+                println!("cargo:rustc-link-search=native={}", path.display());
             }
         }
     }

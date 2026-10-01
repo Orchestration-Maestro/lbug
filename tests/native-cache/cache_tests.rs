@@ -1,5 +1,14 @@
 use std::{env, fs, path::PathBuf, process::Command};
 use tempfile::TempDir;
+#[cfg(unix)]
+#[path = "cache_flags.rs"]
+mod flags;
+#[cfg(unix)]
+#[path = "cache_guards.rs"]
+mod guards;
+#[cfg(unix)]
+#[path = "cache_handles.rs"]
+mod handles;
 
 struct Fixture {
     temp: TempDir,

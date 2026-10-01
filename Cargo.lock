@@ -616,6 +616,7 @@ dependencies = [
  "rustversion",
  "serde_json",
  "sha2",
+ "shlex",
  "tempfile",
  "time",
  "uuid",

@@ -182,6 +182,7 @@ dependencies = [
  "libc",
  "rustversion",
  "sha2",
+ "shlex",
  "tempfile",
  "vcpkg",
 ]

@@ -75,6 +75,9 @@ def main():
         shutil.copytree(repository, root / "fork", ignore=shutil.ignore_patterns(".git", ".cache", "target", "__pycache__"))
         consumer = root / "consumer"
         shutil.copytree(fixture_repository / "tests/source-default", consumer, ignore=shutil.ignore_patterns("target"))
+        if args.repository:
+            # The historical downloader predates E03's build dependencies.
+            shutil.copyfile(fixture_repository / "tests/source-default/historical-Cargo.lock", consumer / "Cargo.lock")
         manifest = consumer / "Cargo.toml"
         manifest.write_text(manifest.read_text(encoding="utf-8").replace('path = "../.."', 'path = ' + json.dumps((root / "fork").as_posix())), encoding="utf-8")
         env["CARGO_HOME"] = str(root / "cargo-home")

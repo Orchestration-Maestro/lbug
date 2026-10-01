@@ -1,18 +1,30 @@
 use crate::build_env as env;
+#[cfg(unix)]
+#[path = "cache_dir.rs"]
+mod cache_dir;
 #[path = "cache_key.rs"]
 mod cache_key;
 
+#[cfg(unix)]
+use cache_dir::Directory;
+#[cfg(unix)]
+use std::{fmt::Write, fs, io::Read, os::unix::fs::MetadataExt};
 use std::{
-    fmt::Write,
-    fs, io,
+    io,
     path::{Path, PathBuf},
 };
 
+#[cfg(unix)]
 pub(crate) struct NativeCache {
-    root: PathBuf,
-    entry: PathBuf,
+    root_path: PathBuf,
+    root: Directory,
+    entry: String,
     key: String,
 }
+
+// Ownership verification is unavailable: no cache can be constructed here.
+#[cfg(not(unix))]
+pub(crate) enum NativeCache {}
 
 impl NativeCache {
     pub(crate) fn from_env(source: &Path) -> io::Result<Option<Self>> {
@@ -23,8 +35,7 @@ impl NativeCache {
             println!("cargo:warning=native cache disabled by {variable}: external toolchain/file inputs cannot be fully identified; building from source");
             return Ok(None);
         }
-        // The selected source must be accessible even on source-only platforms.
-        fs::metadata(source)?;
+        std::fs::metadata(source)?;
         #[cfg(not(unix))]
         {
             let _ = root;
@@ -34,56 +45,61 @@ impl NativeCache {
         #[cfg(unix)]
         {
             use std::os::unix::fs::DirBuilderExt;
-            let root = PathBuf::from(root);
+            let root_path = PathBuf::from(root);
             fs::DirBuilder::new()
                 .recursive(true)
                 .mode(0o700)
-                .create(&root)?;
-            trusted(&root, true).map_err(|error| {
+                .create(&root_path)?;
+            let root = Directory::open(&root_path).map_err(|error| {
                 io::Error::other(format!(
                     "untrusted LBUG_NATIVE_CACHE_DIR {}: {error}",
-                    root.display()
+                    root_path.display()
                 ))
             })?;
-            let root = root.canonicalize()?;
             let key = cache_key::key(source)?;
-            let entry = root.join(format!("entry-{key}"));
-            Ok(Some(Self { root, entry, key }))
+            let entry = format!("entry-{key}");
+            Ok(Some(Self {
+                root_path,
+                root,
+                entry,
+                key,
+            }))
         }
     }
 
-    fn valid(&self) -> io::Result<()> {
-        trusted(&self.entry, true)?;
-        let manifest = self.entry.join("manifest.sha256");
-        trusted(&manifest, false)?;
-        let text = fs::read_to_string(&manifest)?;
+    #[cfg(not(unix))]
+    pub(crate) fn get_or_build(self, _build: impl FnOnce(&Path) -> PathBuf) -> io::Result<PathBuf> {
+        match self {}
+    }
+}
+
+#[cfg(unix)]
+impl NativeCache {
+    fn unchanged_root(&self) -> io::Result<()> {
+        let current = Directory::open(&self.root_path)?;
+        let held = cache_dir::trusted(&self.root.0, true)?;
+        let current = current.0.metadata()?;
+        if held.dev() != current.dev() || held.ino() != current.ino() {
+            return Err(io::Error::other("LBUG_NATIVE_CACHE_DIR was replaced"));
+        }
+        Ok(())
+    }
+
+    // Verify the bytes already copied from no-follow, checked handles. The linker
+    // only sees target-owned copies, never a replaceable cache pathname.
+    fn verified_copy(&self, destination: &Path) -> io::Result<()> {
+        let entry = self.root.directory(self.entry.as_ref())?;
+        let mut manifest = entry.open_file("manifest.sha256".as_ref())?;
+        cache_dir::trusted(&manifest, false)?;
+        let mut text = String::new();
+        manifest.read_to_string(&mut text)?;
         let mut lines = text.lines();
         if lines.next() != Some(format!("lbug-native-cache-v1 {}", self.key).as_str()) {
             return Err(io::Error::other("native cache manifest key mismatch"));
         }
-        let paths = cache_key::files(&self.entry)?;
         let mut actual = Vec::new();
-        for path in paths {
-            if path == Path::new("manifest.sha256") {
-                continue;
-            }
-            let full = self.entry.join(&path);
-            for parent in path
-                .ancestors()
-                .skip(1)
-                .filter(|path| !path.as_os_str().is_empty())
-            {
-                trusted(&self.entry.join(parent), true)?;
-            }
-            trusted(&full, false)?;
-            actual.push(format!(
-                "{}  {}",
-                cache_key::digest_file(&full)?,
-                path.to_string_lossy().replace('\\', "/")
-            ));
-        }
-        // Checking the exact inventory refuses omitted, extra, duplicate and
-        // traversing manifest names without ever opening a manifest-supplied path.
+        copy_checked(&entry, destination, Path::new(""), &mut actual)?;
+        actual.sort();
         if actual.is_empty() || actual.iter().map(String::as_str).ne(lines) {
             return Err(io::Error::other(
                 "native cache artifact digest/inventory mismatch",
@@ -93,32 +109,72 @@ impl NativeCache {
     }
 
     pub(crate) fn get_or_build(self, build: impl FnOnce(&Path) -> PathBuf) -> io::Result<PathBuf> {
-        self.get_or_build_with(build, rename_no_replace)
+        self.run(
+            build,
+            |root, source, destination| root.publish(source.as_os_str(), destination.as_os_str()),
+            fs::File::sync_all,
+        )
     }
 
+    #[cfg(test)]
     pub(crate) fn get_or_build_with(
         self,
         build: impl FnOnce(&Path) -> PathBuf,
         publish: impl FnOnce(&Path, &Path) -> io::Result<()>,
     ) -> io::Result<PathBuf> {
-        if self.valid().is_ok() {
-            println!("cargo:warning=native cache hit: {}", self.entry.display());
-            return Ok(self.entry);
+        self.run(
+            build,
+            |_, source, destination| publish(source, destination),
+            fs::File::sync_all,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn get_or_build_with_sync(
+        self,
+        build: impl FnOnce(&Path) -> PathBuf,
+        sync: impl Fn(&fs::File) -> io::Result<()>,
+    ) -> io::Result<PathBuf> {
+        self.run(
+            build,
+            |root, source, destination| root.publish(source.as_os_str(), destination.as_os_str()),
+            sync,
+        )
+    }
+
+    fn run(
+        self,
+        build: impl FnOnce(&Path) -> PathBuf,
+        publish: impl FnOnce(&Directory, &Path, &Path) -> io::Result<()>,
+        sync: impl Fn(&fs::File) -> io::Result<()>,
+    ) -> io::Result<PathBuf> {
+        self.unchanged_root()?;
+        let out = PathBuf::from(
+            env::var_os("OUT_DIR").ok_or_else(|| io::Error::other("missing OUT_DIR"))?,
+        );
+        fs::create_dir_all(&out)?;
+        let snapshot = tempfile::Builder::new()
+            .prefix("native-engine-")
+            .tempdir_in(&out)?;
+        if self.verified_copy(snapshot.path()).is_ok() {
+            println!(
+                "cargo:warning=native cache hit: {}",
+                self.root_path.join(&self.entry).display()
+            );
+            return Ok(snapshot.keep());
         }
+        // Discard all bytes from a refused entry before staging a fresh build.
+        snapshot.close()?;
         println!(
             "cargo:warning=native cache miss/refusal: {}",
-            self.entry.display()
+            self.root_path.join(&self.entry).display()
         );
-        let work = tempfile::Builder::new()
-            .prefix(".work-")
-            .tempdir_in(&self.root)?;
+        let work = tempfile::Builder::new().prefix(".work-").tempdir_in(&out)?;
         let built = build(work.path());
         let payload = tempfile::Builder::new()
-            .prefix(".private-")
-            .tempdir_in(&self.root)?;
+            .prefix("native-engine-")
+            .tempdir_in(&out)?;
         let mut inventory = Vec::new();
-        // Store only runtime/link artifacts and generated headers, not object
-        // files or CMake state tied to the private build/source location.
         collect_artifacts(
             &built.join("build/src"),
             &built,
@@ -146,34 +202,90 @@ impl NativeCache {
             )
             .expect("writing to String is infallible");
         }
-        let manifest = payload.path().join("manifest.sha256");
-        fs::write(&manifest, text)?;
-        private_permissions(&manifest, false)?;
-        sync_tree(payload.path())?;
-        match publish(payload.path(), &self.entry) {
+        fs::write(payload.path().join("manifest.sha256"), text)?;
+        self.unchanged_root()?;
+        let private_name = payload.path().file_name().unwrap();
+        let private = self.root.create_directory(private_name)?;
+        let publication = (|| {
+            stage_synced(payload.path(), &private, &sync)?;
+            publish(&self.root, Path::new(private_name), Path::new(&self.entry))
+        })();
+        match publication {
             Ok(()) => {
-                fs::File::open(&self.root)?.sync_all()?;
+                self.root.0.sync_all()?;
                 println!(
                     "cargo:warning=native cache published: {}",
-                    self.entry.display()
+                    self.root_path.join(&self.entry).display()
                 );
-                Ok(self.entry)
             }
             Err(error) => {
-                // Another writer may have won; never replace even an empty or
-                // invalid entry. Unsupported no-replace also builds privately.
-                if self.valid().is_ok() {
-                    return Ok(self.entry);
-                }
+                self.root.remove_tree(private_name)?;
                 println!(
                     "cargo:warning=native cache not published ({error}); keeping private output"
                 );
-                Ok(payload.keep())
             }
         }
+        Ok(payload.keep())
     }
 }
 
+#[cfg(unix)]
+fn copy_checked(
+    dir: &Directory,
+    destination: &Path,
+    relative: &Path,
+    inventory: &mut Vec<String>,
+) -> io::Result<()> {
+    fs::create_dir_all(destination)?;
+    for name in dir.names()? {
+        if relative.as_os_str().is_empty() && name == "manifest.sha256" {
+            continue;
+        }
+        let mut file = dir.open_file(&name)?;
+        let directory = file.metadata()?.is_dir();
+        cache_dir::trusted(&file, directory)?;
+        let path = relative.join(&name);
+        if directory {
+            copy_checked(&Directory(file), &destination.join(&name), &path, inventory)?;
+        } else {
+            let target = destination.join(&name);
+            let mut output = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&target)?;
+            io::copy(&mut file, &mut output)?;
+            inventory.push(format!(
+                "{}  {}",
+                cache_key::digest_file(&target)?,
+                path.to_string_lossy().replace('\\', "/")
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn stage_synced(
+    source: &Path,
+    destination: &Directory,
+    sync: &impl Fn(&fs::File) -> io::Result<()>,
+) -> io::Result<()> {
+    for item in fs::read_dir(source)? {
+        let item = item?;
+        if item.file_type()?.is_dir() {
+            let dir = destination.create_directory(&item.file_name())?;
+            stage_synced(&item.path(), &dir, sync)?;
+        } else {
+            let mut input = fs::File::open(item.path())?;
+            let mut output = destination.create_file(&item.file_name())?;
+            io::copy(&mut input, &mut output)?;
+            sync(&output)?;
+        }
+    }
+    destination.0.sync_all()
+}
+
+#[cfg(unix)]
 fn collect_artifacts(
     dir: &Path,
     built: &Path,
@@ -201,107 +313,9 @@ fn collect_artifacts(
             let relative = path.strip_prefix(built).unwrap().to_path_buf();
             let destination = payload.join(&relative);
             fs::create_dir_all(destination.parent().unwrap())?;
-            // Dereference CMake's shared-library aliases into independent files.
             fs::copy(path, &destination)?;
-            private_permissions(&destination, false)?;
             inventory.push(relative);
         }
     }
     Ok(())
-}
-
-fn sync_tree(dir: &Path) -> io::Result<()> {
-    private_permissions(dir, true)?;
-    for entry in fs::read_dir(dir)? {
-        let path = entry?.path();
-        if path.is_dir() {
-            sync_tree(&path)?;
-        } else {
-            fs::File::open(path)?.sync_all()?;
-        }
-    }
-    fs::File::open(dir)?.sync_all()
-}
-
-fn private_permissions(path: &Path, directory: bool) -> io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(
-            path,
-            fs::Permissions::from_mode(if directory { 0o700 } else { 0o600 }),
-        )
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (path, directory);
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "cache permissions cannot be verified on this platform",
-        ))
-    }
-}
-
-fn trusted(path: &Path, directory: bool) -> io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        let metadata = fs::symlink_metadata(path)?;
-        // SAFETY: geteuid takes no arguments and has no memory preconditions.
-        let uid = unsafe { libc::geteuid() };
-        if metadata.uid() != uid
-            || metadata.mode() & 0o022 != 0
-            || (directory && !metadata.is_dir())
-            || (!directory && (!metadata.is_file() || metadata.nlink() != 1))
-        {
-            return Err(io::Error::other("expected current-user-owned, non-group/other-writable regular cache entry (no links)"));
-        }
-        Ok(())
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (path, directory);
-        Err(io::Error::other(
-            "native cache ownership verification unavailable",
-        ))
-    }
-}
-
-/// Atomically publish without replacing any existing name. Never fall back to
-/// plain rename: it can replace an empty directory planted by another writer.
-fn rename_no_replace(source: &Path, destination: &Path) -> io::Result<()> {
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    {
-        use std::{ffi::CString, os::unix::ffi::OsStrExt};
-        let source = CString::new(source.as_os_str().as_bytes())?;
-        let destination = CString::new(destination.as_os_str().as_bytes())?;
-        // SAFETY: both C strings are valid for the duration of this call.
-        #[cfg(target_os = "linux")]
-        let result = unsafe {
-            libc::renameat2(
-                libc::AT_FDCWD,
-                source.as_ptr(),
-                libc::AT_FDCWD,
-                destination.as_ptr(),
-                libc::RENAME_NOREPLACE,
-            )
-        };
-        // SAFETY: both C strings are valid for the duration of this call.
-        #[cfg(target_os = "macos")]
-        let result =
-            unsafe { libc::renamex_np(source.as_ptr(), destination.as_ptr(), libc::RENAME_EXCL) };
-        if result == 0 {
-            Ok(())
-        } else {
-            Err(io::Error::last_os_error())
-        }
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-        let _ = (source, destination);
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "atomic no-replace rename unsupported",
-        ))
-    }
 }
