@@ -40,8 +40,10 @@ add_library(lbug STATIC fixture.cpp)
 file(MAKE_DIRECTORY "${{CMAKE_BINARY_DIR}}/src/include")
 file(WRITE "${{CMAKE_BINARY_DIR}}/src/include/generated.h" "#define GENERATED 1\n")
 "##,
-                env::var("PYTHON").unwrap_or_else(|_| "python3".into()),
-                launcher.display()
+                env::var("PYTHON")
+                    .unwrap_or_else(|_| "python3".into())
+                    .replace('\\', "/"),
+                launcher.to_string_lossy().replace('\\', "/")
             ),
         )
         .unwrap();
