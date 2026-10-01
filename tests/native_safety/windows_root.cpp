@@ -187,7 +187,7 @@ int main(int argc, char** argv) {
                     refuses([&] { local.fileOrPathExists(name); }, "unsafe metadata accepted");
                 }
                 require(!local.fileOrPathExists("missing"), "unobserved missing file is not absent");
-                for (auto flags : {FileFlags::WRITE, FileFlags::READ_ONLY | FileFlags::WRITE,
+                for (auto flags : std::vector<int>{FileFlags::WRITE, FileFlags::READ_ONLY | FileFlags::WRITE,
                         FileFlags::WRITE | FileFlags::CREATE_IF_NOT_EXISTS,
                         FileFlags::WRITE | FileFlags::CREATE_AND_TRUNCATE_IF_EXISTS}) {
                     refuses([&] { local.openFile("normal", FileOpenFlags(flags)); }, "writable rooted open accepted", "writable");
@@ -199,6 +199,50 @@ int main(int argc, char** argv) {
             }
             fs::remove(fixtures / "hardlink");
             fs::remove_all(fixtures);
+        });
+        test("active_wal_read_only_replay_has_no_mutations", [&] {
+            auto fixture = parent / "wal";
+            fs::create_directory(fixture); makePrivate(fixture);
+            auto writable = config; writable.readOnly = false;
+            {
+                lbug::main::Database db(utf8(fixture / "wal.lbdb"), writable);
+                lbug::main::Connection connection(&db);
+                require(connection.query("CREATE NODE TABLE Item(id INT64, PRIMARY KEY(id))")->isSuccess(), "SETUP WAL table");
+                require(connection.query("CREATE (:Item {id: 9})")->isSuccess(), "SETUP WAL row");
+            }
+            require(fs::exists(fixture / "wal.lbdb.wal"), "SETUP active WAL missing");
+            auto listing = entries(fixture);
+            std::vector<std::pair<fs::path, Snapshot>> snapshots;
+            for (const auto& entry : fs::directory_iterator(fixture)) snapshots.emplace_back(entry.path(), Snapshot(entry.path()));
+            {
+                auto root = RootDirectory::open(utf8(fixture));
+                lbug::main::Database db(root, "wal.lbdb", config);
+                lbug::main::Connection connection(&db);
+                auto result = connection.query("MATCH (i:Item) RETURN i.id");
+                require(result->isSuccess() && result->hasNext() && result->getNext()->getValue(0)->getValue<int64_t>() == 9,
+                    "active WAL read-only replay returned wrong row");
+            }
+            require(listing == entries(fixture), "read-only replay created or removed a sidecar");
+            for (auto& [file, snapshot] : snapshots) snapshot.unchanged(file);
+            fs::remove_all(fixture);
+        });
+        test("read_only_mutators_remain_closed", [&] {
+            auto root = RootDirectory::open(utf8(path));
+            LocalFileSystem local("db.lbdb", root);
+            auto file = local.openFile("db.lbdb", FileOpenFlags(FileFlags::READ_ONLY));
+            refuses([&] { file->writeFile(reinterpret_cast<const uint8_t*>("x"), 1, 0); }, "rooted write accepted");
+            refuses([&] { file->truncate(0); }, "rooted truncate accepted");
+            refuses([&] { file->syncFile(); }, "rooted sync accepted");
+            refuses([&] { local.syncDirectoryForFile("db.lbdb"); }, "directory sync became a no-op");
+            refuses([&] { local.adoptCompanionFiles(); }, "read-only adoption accepted");
+            refuses([&] { local.createPKValidatorSpillFile("db.lbdb"); }, "read-only temp creation accepted");
+            refuses([&] { local.renameFile("db.lbdb", "other"); }, "read-only rename accepted");
+            refuses([&] { local.removeFileIfExists("db.lbdb.wal"); }, "read-only unlink accepted");
+            refuses([&] { local.copyFile("db.lbdb", "copy"); }, "read-only copy accepted");
+            refuses([&] { local.overwriteFile("db.lbdb", "copy"); }, "read-only overwrite accepted");
+            refuses([&] { local.createDir("dir"); }, "read-only directory create accepted");
+            refuses([&] { local.glob(nullptr, "*"); }, "rooted glob accepted");
+            refuses([&] { local.expandPath(nullptr, "db.lbdb"); }, "rooted expansion accepted");
         });
 #ifdef MAESTRO_NATIVE_OPEN_TEST
         test("unsafe_windows_name_never_calls_native_open", [&] {
@@ -237,6 +281,21 @@ int main(int argc, char** argv) {
                 refuses([&] { local.openFile("db.lbdb", FileOpenFlags(FileFlags::READ_ONLY))->readFile(nullptr, 0); },
                     volume ? "changed volume accepted" : "changed file ID accepted", "identity");
                 require(content == 0, "identity refusal reached content API");
+            }
+        });
+        test("held_ancestor_identity_interleave_refuses", [&] {
+            for (bool volume : {false, true}) {
+                auto root = RootDirectory::open(utf8(path));
+                Hook hook([&](const char* op, void* h, void* info) {
+                    if (std::string(op) == "identity" && leaf(h, L"root")) {
+                        auto id = static_cast<FILE_ID_INFO*>(info);
+                        if (volume) ++id->VolumeSerialNumber;
+                        else id->FileId.Identifier[0] ^= 1;
+                    }
+                    return 0;
+                });
+                refuses([&] { root->probeRegularFile("db.lbdb"); },
+                    volume ? "changed ancestor volume accepted" : "changed ancestor ID accepted", "ancestor identity");
             }
         });
         test("after_probe_identity_interleave_refuses", [&] {
