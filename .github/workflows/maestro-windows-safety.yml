@@ -330,6 +330,76 @@ jobs:
           foreach ($required in @('windows_rooted_read_only_roundtrip_and_wrapper_lifetime ... ok', 'windows_writable_rooted_constructor_refuses_before_io ... ok', '2 passed; 0 failed')) {
             if (!(Select-String -Path (Join-Path $evidence 'rust-root-green.txt') -SimpleMatch $required -Quiet)) { throw "Missing mandatory Rust evidence: $required" }
           }
+          # Disposable-branch-only mutations; no mutants in the delivered branch.
+          $rootSource = 'lbug-src/src/common/file_system/root_directory_windows.cpp'
+          $localSource = 'lbug-src/src/common/file_system/local_file_system.cpp'
+          $dbSource = 'lbug-src/src/main/database.cpp'
+          $nativeExe = Join-Path $root 'maestro_native_safety.exe'
+          function Build-RootMutation {
+            cmake --build target/native-safety --config Release --target maestro_windows_root maestro_native_safety --parallel 3
+            if ($LASTEXITCODE -ne 0) { throw 'Root mutation build failed' }
+            Copy-Item target/native-safety/Release/maestro_windows_root.exe $exe -Force
+            Copy-Item target/native-safety/Release/maestro_native_safety.exe $nativeExe -Force
+          }
+          function Build-RustMutation {
+            $env:LBUG_LIBRARY_DIR = "$pwd/target/native-safety/src/Release"
+            $env:LBUG_INCLUDE_DIR = "$pwd/lbug-src/src/include"
+            $env:CXXFLAGS = "/DLBUG_BUNDLED /I$pwd/target/native-safety/engine/src/include"
+            cargo clean -p lbug --release
+            if ($LASTEXITCODE -ne 0) { throw 'Rust archive invalidation failed' }
+            $output = cargo test --release --locked --no-default-features --no-run --message-format json
+            if ($LASTEXITCODE -ne 0) { throw 'Rust archive relink failed' }
+            $artifacts = @($output | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.reason -eq 'compiler-artifact' -and $_.profile.test -and $_.executable -and $_.target.name -eq 'lbug' })
+            if ($artifacts.Count -ne 1) { throw 'Expected one relinked Rust executable' }
+            Copy-Item $artifacts[0].executable $rustExe -Force
+          }
+          function Root-Mutant($label, $source, $old, $new, $test, $assertion, $matches = 1, $rustProof = $false) {
+            try {
+              $text = Get-Content -Raw $source
+              if ([regex]::Matches($text, [regex]::Escape($old)).Count -ne $matches) { throw "Mutation $label must match exactly $matches times" }
+              [IO.File]::WriteAllText((Join-Path $pwd $source), $text.Replace($old, $new))
+              git diff -- $source | Set-Content (Join-Path $evidence "$label.diff")
+              Build-RootMutation
+              $result = Run-RootChild $exe @($root, $test) $label
+              if ($result[-1] -ne 1 -or !(Select-String -Path (Join-Path $evidence "$label.txt") -SimpleMatch "FAIL ${test}: $assertion" -Quiet)) {
+                throw "Mutation $label did not exit 1 at its named assertion"
+              }
+              if ($rustProof) {
+                $native = Run-RootChild $nativeExe @() "$label-native"
+                if ($native[-1] -ne 1 -or !(Select-String -Path (Join-Path $evidence "$label-native.txt") -SimpleMatch 'FAIL windows writable construction refuses before I/O' -Quiet)) { throw 'Native writable constructor mutant survived' }
+                Build-RustMutation
+                $rust = Run-RootChild $rustExe @('native_safety_tests::windows_writable_rooted_constructor_refuses_before_io', '--exact', '--nocapture') "$label-rust"
+                if ($rust[-1] -ne 101 -or !(Select-String -Path (Join-Path $evidence "$label-rust.txt") -SimpleMatch 'windows_writable_rooted_constructor_refuses_before_io ... FAILED' -Quiet)) { throw 'Rust writable constructor mutant survived' }
+              }
+            } finally {
+              git checkout -- $source
+              if ($LASTEXITCODE -ne 0) { throw 'Mutant restore failed' }
+              Build-RootMutation
+            }
+          }
+          Build-RootMutation
+          Root-Mutant 'ancestor-delete-share' $rootSource '(directory ? 0 : FILE_SHARE_DELETE)' '(directory ? FILE_SHARE_DELETE : FILE_SHARE_DELETE)' 'held_ancestor_cannot_move' 'second process moved or deleted held ancestor'
+          Root-Mutant 'omit-no-follow' $rootSource 'ULONG options = FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT;' 'ULONG options = FILE_SYNCHRONOUS_IO_NONALERT;' 'no_follow_open_is_required' 'native open omitted FILE_OPEN_REPARSE_POINT'
+          Root-Mutant 'omit-reparse-attribute' $rootSource 'if (attributes.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)' 'if (false)' 'junction_below_root_refuses' 'junction reparse attribute accepted'
+          Root-Mutant 'omit-link-count' $rootSource 'if (!directory && standard.NumberOfLinks != 1)' 'if (false)' 'link_count_is_required' 'multi-link file accepted'
+          Root-Mutant 'omit-observed-id' $rootSource 'if (remembered != observedFiles.end() && !sameIdentity(remembered->second, id))' 'if (false)' 'read_probe_identity_interleave_refuses' 'changed file ID accepted'
+          Root-Mutant 'omit-file-id' $rootSource 'std::memcmp(a.FileId.Identifier, b.FileId.Identifier, sizeof(a.FileId.Identifier)) == 0' 'true' 'held_ancestor_identity_interleave_refuses' 'changed ancestor ID accepted'
+          Root-Mutant 'omit-volume' $rootSource 'a.VolumeSerialNumber == b.VolumeSerialNumber &&' 'true &&' 'held_ancestor_identity_interleave_refuses' 'changed ancestor volume accepted'
+          Root-Mutant 'allow-ads' $rootSource 'L"/\\:*?\"<>|"' 'L"/\\*?\"<>|"' 'unsafe_windows_name_never_calls_native_open' 'unsafe Windows name accepted'
+          Root-Mutant 'allow-invalid-utf8' $rootSource 'MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,' 'MultiByteToWideChar(CP_UTF8, 0,' 'unsafe_windows_name_never_calls_native_open' 'unsafe Windows name accepted' 2
+          Root-Mutant 'enable-writable-construction' $dbSource 'if (!systemConfig.readOnly)' 'if (false)' 'writable_constructor_never_probes' 'writable constructor probed before refusal' 1 $true
+          Root-Mutant 'ignore-readfile-failure' $localSource 'if (!ReadFile((HANDLE)localFileInfo->handle, buf, bytes, &numBytesRead, nullptr))' 'if (false && !ReadFile((HANDLE)localFileInfo->handle, buf, bytes, &numBytesRead, nullptr))' 'failed_read_and_seek_propagate' 'ReadFile failure ignored'
+          Root-Mutant 'ignore-seek-failure' $localSource 'if (!SetFilePointerEx((HANDLE)localFileInfo->handle, offset_, &result, whence))' 'if (false && !SetFilePointerEx((HANDLE)localFileInfo->handle, offset_, &result, whence))' 'failed_read_and_seek_propagate' 'SetFilePointerEx failure ignored'
+          git diff --exit-code -- $rootSource $localSource $dbSource
+          if ($LASTEXITCODE -ne 0) { throw 'Production sources were not restored' }
+          Build-RustMutation
+          $restored = Run-RootChild (Get-Command ctest).Source @('--test-dir', $root, '-R', '^maestro_windows_root$', '--verbose', '--timeout', '120', '--output-on-failure') 'root-restored-green'
+          if ($restored[-1] -ne 0) { throw 'Restored root suite failed' }
+          $native = Run-RootChild $nativeExe @() 'native-restored-green'
+          if ($native[-1] -ne 0) { throw 'Restored native constructors failed' }
+          $rust = Run-RootChild $rustExe @('native_safety_tests', '--nocapture', '--test-threads=3') 'rust-restored-green'
+          if ($rust[-1] -ne 0) { throw 'Restored Rust constructors failed' }
+          'mutants=12 killed=12 restored-green=1' | Set-Content (Join-Path $evidence 'mutant-summary.txt')
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:

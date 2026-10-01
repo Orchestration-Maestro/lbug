@@ -1,10 +1,6 @@
 name: Maestro native safety
 
 on:
-  pull_request:
-    branches: [build/patched-0.20.4, build/lbug-0.20.4-cmake-reuse, fix/e03b-source-default]
-  push:
-    branches: [build/patched-0.20.4, build/lbug-0.20.4-cmake-reuse]
   workflow_dispatch:
 
 permissions:
