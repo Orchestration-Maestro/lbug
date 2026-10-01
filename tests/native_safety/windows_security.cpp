@@ -301,12 +301,16 @@ void unreadable_security_is_not_private(const fs::path& scratch) {
 }
 void non_sddl_inputs(const fs::path& scratch) {
     Fixture f(scratch); Descriptor good(privateSD);
-    for (auto fault : {seam::Fault::Token, seam::Fault::Query, seam::Fault::Control, seam::Fault::GetAce, seam::Fault::Impersonation}) {
+    for (auto fault : {seam::Fault::Token, seam::Fault::Query, seam::Fault::Control, seam::Fault::GetAce}) {
         seam::setFault(fault);
-        try { refused([&] { validateRootSecurity(f.directory->value); }, "injected API/token/impersonation refusal"); }
+        try { refused([&] { validateRootSecurity(f.directory->value); }, "injected API/token refusal"); }
         catch (...) { seam::setFault(seam::Fault::None); throw; }
         seam::setFault(seam::Fault::None);
     }
+    seam::setFault(seam::Fault::Impersonation);
+    try { refused([&] { validateRootSecurity(f.directory->value); }, "unreadable thread token refused", "active or unreadable impersonation token"); }
+    catch (...) { seam::setFault(seam::Fault::None); throw; }
+    seam::setFault(seam::Fault::None);
     auto user = sid(U);
     refused([&] { seam::validateDescriptor(good.data.get(), good.size, nullptr, 0, true, nullptr, 0); }, "null token SID");
     refused([&] { seam::validateDescriptor(good.data.get(), good.size, user.get(), 1, true, nullptr, 0); }, "truncated token SID");
@@ -348,6 +352,14 @@ void non_sddl_inputs(const fs::path& scratch) {
         DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
         nullptr, nullptr, safeAcl, nullptr) == ERROR_SUCCESS, "SETUP unprotected root");
     refused([&] { validateRootSecurity(f.directory->value); }, "real V05 root protection", "protected root");
+    Descriptor protectedFile("D:P(A;;FA;;;" + f.userSID + ")");
+    BOOL filePresent, fileDefaulted; PACL fileAcl = nullptr;
+    require(GetSecurityDescriptorDacl(protectedFile.data.get(), &filePresent, &fileAcl, &fileDefaulted) && filePresent && fileAcl,
+        "SETUP protected regular file DACL");
+    require(SetSecurityInfo(f.child->value, SE_FILE_OBJECT,
+        DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+        nullptr, nullptr, fileAcl, nullptr) == ERROR_SUCCESS, "SETUP protected regular file SetSecurityInfo");
+    refused([&] { validateRootSecurity(f.child->value); }, "protected regular file cannot be root", "root security requires directory");
     f.unchanged();
     std::cout << "PASS non_SDDL_inputs\n";
 }

@@ -67,13 +67,16 @@ struct Bytes {
     }
 };
 void noImpersonation(const Api& api) {
-#ifdef MAESTRO_WINDOWS_SECURITY_TEST
-    if (testFault == windows_security_test::Fault::Impersonation) fail("active impersonation");
-#endif
     HANDLE raw = nullptr;
-    const BOOL opened = api.threadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &raw);
-    const DWORD error = opened ? ERROR_SUCCESS : GetLastError();
+    BOOL opened = api.threadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &raw);
+    DWORD error = opened ? ERROR_SUCCESS : GetLastError();
     Handle token(raw);
+#ifdef MAESTRO_WINDOWS_SECURITY_TEST
+    if (testFault == windows_security_test::Fault::Impersonation) {
+        opened = FALSE;
+        error = ERROR_ACCESS_DENIED;
+    }
+#endif
     if (opened || error != ERROR_NO_TOKEN) fail("active or unreadable impersonation token");
 }
 struct PrimaryUser {
