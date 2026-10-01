@@ -70,8 +70,6 @@ fn rooted_constructor_create_write_and_read_only_wal_reopen() -> anyhow::Result<
         .max_num_threads(1)
         .auto_checkpoint(false);
     {
-        // Rooted removeFileIfExists always throws: successful construction proves
-        // startup did not attempt deletion (there is no production counting hook).
         let db = checked(&owned, &sibling, || {
             Database::new_rooted(&root, "normal.lbdb", config.clone())
         })?;
@@ -99,21 +97,60 @@ fn rooted_constructor_create_write_and_read_only_wal_reopen() -> anyhow::Result<
             Value::Int64(7)
         );
     }
-    let error = checked(&owned, &sibling, || {
-        Database::new_rooted(&root, "normal.lbdb", config.clone())
-    })
-    .expect_err("writable WAL recovery remains unsupported");
-    assert!(error.to_string().contains("unsupported in E01a"), "{error}");
-    let db = checked(&owned, &sibling, || {
-        Database::new_rooted(&root, "checkpoint.lbdb", config)
-    })?;
-    let connection = Connection::new(&db)?;
-    connection.query("CALL force_checkpoint_on_close=false")?;
-    let error = checked(&owned, &sibling, || connection.query("CHECKPOINT"))
-        .expect_err("rooted checkpoint must fail closed");
-    assert!(error.to_string().contains("unsupported in E01a"), "{error}");
+    {
+        let db = checked(&owned, &sibling, || {
+            Database::new_rooted(&root, "normal.lbdb", config.clone())
+        })?;
+        let connection = Connection::new(&db)?;
+        checked(&owned, &sibling, || {
+            connection.query("CALL force_checkpoint_on_close=false")
+        })?;
+        assert_eq!(
+            checked(&owned, &sibling, || connection
+                .query("MATCH (i:Item) RETURN i.id"))?
+            .next()
+            .unwrap()[0],
+            Value::Int64(7)
+        );
+        checked(&owned, &sibling, || connection.query("BEGIN TRANSACTION"))?;
+        checked(&owned, &sibling, || {
+            connection.query("CREATE (:Item {id: 8})")
+        })?;
+        checked(&owned, &sibling, || connection.query("ROLLBACK"))?;
+        checked(&owned, &sibling, || connection.query("CHECKPOINT"))?;
+    }
+    let before = std::fs::read_dir(&owned)?
+        .map(|e| e.unwrap().file_name())
+        .collect::<Vec<_>>();
+    {
+        let db = checked(&owned, &sibling, || {
+            Database::new_rooted(&root, "normal.lbdb", config.read_only(true))
+        })?;
+        let connection = Connection::new(&db)?;
+        assert_eq!(
+            checked(&owned, &sibling, || connection
+                .query("MATCH (i:Item) RETURN count(*)"))?
+            .next()
+            .unwrap()[0],
+            Value::Int64(1)
+        );
+    }
+    assert_eq!(
+        before,
+        std::fs::read_dir(&owned)?
+            .map(|e| e.unwrap().file_name())
+            .collect::<Vec<_>>()
+    );
+    for suffix in [
+        "wal",
+        "wal.checkpoint",
+        "shadow",
+        "checkpoint.intent.lock",
+        "checkpoint.apply.lock",
+    ] {
+        assert!(!owned.join(format!("normal.lbdb.{suffix}")).exists());
+    }
     assert!(!owned.join("normal.lbdb.tmp").exists());
-    assert!(!owned.join("checkpoint.lbdb.tmp").exists());
     Ok(())
 }
 

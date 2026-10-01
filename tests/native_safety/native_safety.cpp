@@ -188,7 +188,7 @@ int main() {
                 if (op == "removeFileIfExists") { vfs.removeFileIfExists((sibling / "db.lbdb.wal").string()); }
                 if (op == "glob") { vfs.glob(nullptr, sentinel.string()); }
                 if (op == "expandPath") { vfs.expandPath(nullptr, sentinel.string()); }
-            }); }, operation);
+            }); }, (std::string(operation) == "renameFile" || std::string(operation) == "removeFileIfExists") ? "" : operation);
         });
     }
     test("plain names validated before FS calls", [&] {
@@ -210,8 +210,6 @@ int main() {
         auto config = lbug::main::SystemConfig(16 * 1024 * 1024, 1);
         config.maxDBSize = 64 * 1024 * 1024;
         config.forceCheckpointOnClose = false;
-        // Rooted removeFileIfExists always throws: green create/reopen is the
-        // behavioural oracle that startup did not call it. No production counter.
         checked([&] { lbug::main::Database db(root, "normal.lbdb", config); });
         config.readOnly = true;
         checked([&] { lbug::main::Database db(root, "normal.lbdb", config); });
@@ -235,76 +233,60 @@ int main() {
                 "checkpoint created a sidecar");
         }
     };
-    test("empty checkpoint refusal keeps database reopenable", [&] {
+    test("empty checkpoint keeps database reopenable", [&] {
         auto config = checkpointConfig();
         {
             lbug::main::Database db(root, "checkpoint-repro.lbdb", config);
-            const auto beforeBytes = bytes(rootPath / "checkpoint-repro.lbdb");
             lbug::main::Connection connection(&db);
             auto result = checked([&] { return connection.query("CHECKPOINT"); });
-            require(!result->isSuccess(), "unsupported checkpoint succeeded");
-            require(beforeBytes == bytes(rootPath / "checkpoint-repro.lbdb"), "checkpoint changed base bytes");
+            require(result->isSuccess(), "rooted checkpoint failed");
             noCheckpointSidecars("checkpoint-repro.lbdb");
         }
         reopenCheckpoint("checkpoint-repro.lbdb", config);
     });
     test("default rooted close keeps empty database reopenable", [&] {
         auto config = checkpointConfig();
-        std::string beforeBytes;
         config.forceCheckpointOnClose = true;
         {
             lbug::main::Database db(root, "close-repro.lbdb", config);
-            beforeBytes = bytes(rootPath / "close-repro.lbdb");
         }
-        require(beforeBytes == bytes(rootPath / "close-repro.lbdb"), "close changed base bytes");
         noCheckpointSidecars("close-repro.lbdb");
         config.forceCheckpointOnClose = false;
         reopenCheckpoint("close-repro.lbdb", config);
     });
-    test("rooted auto checkpoint refuses before changing base", [&] {
+    test("rooted auto checkpoint succeeds and cleans companions", [&] {
         auto config = checkpointConfig();
         config.autoCheckpoint = true;
         config.checkpointThreshold = 0;
         lbug::main::Database db(root, "auto-checkpoint.lbdb", config);
-        const auto beforeBytes = bytes(rootPath / "auto-checkpoint.lbdb");
         lbug::main::Connection connection(&db);
         auto result = checked([&] {
             return connection.query("CREATE NODE TABLE Auto(id INT64, PRIMARY KEY(id))");
         });
-        require(!result->isSuccess() &&
-            result->getErrorMessage().find("post-commit checkpoint failed") != std::string::npos &&
-            result->getErrorMessage().find("Restricted filesystem checkpoint") != std::string::npos,
-            "auto checkpoint did not reach restricted refusal");
-        require(beforeBytes == bytes(rootPath / "auto-checkpoint.lbdb"), "auto checkpoint changed base bytes");
-        require(fs::exists(rootPath / "auto-checkpoint.lbdb.wal"), "committed WAL missing");
-        for (auto suffix : {".shadow", ".wal.checkpoint", ".checkpoint.intent.lock", ".checkpoint.apply.lock"}) {
-            require(!fs::exists(rootPath / (std::string("auto-checkpoint.lbdb") + suffix)),
-                "auto checkpoint created a sidecar");
-        }
+        require(result->isSuccess(), "auto checkpoint failed");
+        noCheckpointSidecars("auto-checkpoint.lbdb");
     });
-    test("rooted writable recovery refuses existing sidecars", [&] {
+    test("rooted writable recovery refuses unsafe sidecars", [&] {
         auto config = checkpointConfig();
-        for (auto suffix : {".wal", ".wal.checkpoint", ".shadow"}) {
+        for (auto suffix : {".wal", ".wal.checkpoint", ".shadow", ".tmp"}) {
             auto name = std::string("recovery") + suffix + ".lbdb";
             checked([&] { lbug::main::Database db(root, name, config); });
             const auto beforeBytes = bytes(rootPath / name);
-            std::ofstream(rootPath / (name + suffix)) << "pending recovery";
-            refused([&] { checked([&] { lbug::main::Database db(root, name, config); }); },
-                "Restricted writable WAL recovery");
+            fs::create_symlink(sentinel, rootPath / (name + suffix));
+            refused([&] { checked([&] { lbug::main::Database db(root, name, config); }); });
             require(beforeBytes == bytes(rootPath / name), "recovery changed base bytes");
-            require(bytes(rootPath / (name + suffix)) == "pending recovery", "recovery changed sidecar");
         }
     });
-    test("forced spill fails closed without temp file", [&] {
-        lbug::storage::BufferManager bm("spill.lbdb", "spill.lbdb.tmp", 16 * 1024 * 1024,
-            64 * 1024 * 1024, &vfs, true);
-        refused([&] { checked([&] { bm.resetSpiller("spill.lbdb.tmp"); }); }, "restricted spill unsupported");
-        require(!fs::exists(rootPath / "spill.lbdb.tmp"), "spill created temp file");
+    test("writable rooted spill reset activates without eager temp creation", [&] {
+        lbug::storage::BufferManager bm("db.lbdb", "db.lbdb.tmp", 16 * 1024 * 1024,
+            64 * 1024 * 1024, &vfs, false);
+        checked([&] { bm.resetSpiller("db.lbdb.tmp"); });
+        require(!fs::exists(rootPath / "db.lbdb.tmp"), "reset eagerly created temp file");
     });
     test("alternative FS dispatch fails closed", [&] {
         refused([&] { checked([&] { vfs.registerFileSystem(std::make_unique<LocalFileSystem>("")); }); }, "registerFileSystem");
         refused([&] { checked([&] { vfs.openFile("https://invalid/db", FileOpenFlags(FileFlags::READ_ONLY)); }); });
-        refused([&] { checked([&] { vfs.FileSystem::renameFile(sentinel.string(), (sibling / "renamed").string()); }); }, "renameFile");
+        refused([&] { checked([&] { vfs.FileSystem::renameFile(sentinel.string(), (sibling / "renamed").string()); }); });
         auto flags = FileOpenFlags(FileFlags::READ_ONLY);
         flags.compressionType = FileCompressionType::GZIP;
         refused([&] { checked([&] { vfs.openFile("db.lbdb", flags); }); }, "compressed openFile");

@@ -1,6 +1,6 @@
-# Restricted projection filesystem: E01a
+# Restricted projection filesystem: E01a / E01b
 
-This is the first native safety slice, **not a qualified engine isolation boundary yet**.
+These are native safety slices, **not a qualified engine isolation boundary yet**.
 Maestro must not adopt restricted mode until every E01 slice and E02 have landed and the
 combined candidate has passed E07a qualification. The existing path constructor remains
 unrestricted and is not suitable for projection isolation.
@@ -22,58 +22,125 @@ adoption. Invalid names are refused before filesystem calls.
 it does not expand home/search paths or reopen the ambient database path. Capabilities may
 outlive the caller's root wrapper. Handle I/O stays handle-based.
 
-The directory must be application-owned and inaccessible to other principals. Revalidation
-catches deterministic replacement; it is not an atomic compare-and-open against arbitrary
-same-principal external tools. Such tools bypassing the ownership boundary are unsupported.
+The directory must be application-owned and inaccessible to other principals. Writable opens
+use an **unpublished session directory**, supplied by the application; this API does not infer
+publication state from a pathname. Revalidation catches deterministic replacement; it is not
+an atomic compare-and-open against arbitrary same-principal external tools. Such tools
+bypassing the ownership boundary are unsupported.
 
 ## Live operations and closed seams
 
-| Operation | E01a disposition | Callers / next slice |
+| Operation | E01a / E01b disposition | Callers / remaining slice |
 | --- | --- | --- |
-| Local `openFile` read/write/create/truncate | Unix held-dirfd `fstatat`/`openat`; regular single-link identity checked before content access; truncation delayed until validation and lock acquisition | `storage/file_handle.cpp`, `storage/shadow_file.cpp`, `storage/wal/{wal,wal_replayer}.cpp`, `storage/checkpointer.cpp` |
-| Startup database-directory probe | Restricted regular-file probe refuses directory/link/alias; absence allowed only for writable create | `main/database.cpp`, `validatePathInReadOnly`; narrow `fileOrPathExists` is also used by startup/WAL/lock discovery |
-| Native read/write locks | `fcntl` on the safely opened descriptor, with no path reopen; requested truncation occurs only after lock acquisition | `storage/file_handle.cpp`, `storage/checkpointer.cpp`, `storage/wal/wal_replayer.cpp` |
-| Root / remembered leaf replacement | Held ancestor identities and observed child identities revalidated; disappearance/replacement refused | Later supported name mutations must update the capability's identity ownership explicitly |
-| Rename (including base fallback), copy/overwrite, createDir, remove, glob, expandPath | Refused in restricted mode, naming the unsupported operation; no ambient fallback | Later E01 slices |
-| Alternative VFS registration/dispatch | Refused in restricted mode; only local rooted handles supported | Later E01 dispatch slice |
-| Spill activation and writable WAL/shadow recovery | Eager spiller creation disabled only in rooted mode; explicit spill activation and writable recovery with pending sidecars refused | Next E01 spill/checkpoint/delete/rename slice |
-| Windows root capability / restricted construction | Unsupported, fails closed before database I/O | E02 |
+| Local `openFile` read/write/create/truncate | Unix held-dirfd `fstatat`/`openat`; regular single-link identity checked before content access; truncation delayed until validation and lock acquisition; newly created names directory-synced | `storage/file_handle.cpp`, shadow, WAL, checkpointer |
+| Startup and `fileOrPathExists` | Rooted no-follow regular-file probe; unsafe objects/errors are not absence; every later open rechecks | Database startup, WAL, checkpoint lock discovery; static legacy `fileExists` remains deferred to query refusals |
+| Native read/write locks | `fcntl` on the validated descriptor, with no path reopen; requested truncation occurs only after lock acquisition | File handles and checkpoint locks |
+| Root / remembered leaf replacement | Held ancestor identities and observed child identities revalidated; external disappearance/replacement refused | Supported rename/unlink explicitly transfer or revoke identity ownership |
+| Rename, including base `FileSystem` | Same held root/name pair in base, local and virtual FS; owned database/exact-companion source; atomic no-overwrite publication; replacement only of an already owned, identity-validated exact companion | WAL rotation; graph/partition rename remains refused by ownership |
+| `removeFileIfExists` | Exact owned companion or registered generated temp; anchored single-entry `unlinkat`, never recursive removal or extension-directory escape; missing exact companions are idempotent | WAL/shadow/checkpoint locks, spiller and bulk PK validation |
+| Spill and bulk-insert temp | Writable spill activation/reset under the held root; generated PK temps allocated create-new, registered by identity and unlinked through the same rooted removal | Forced-pressure spill/reload; operator's real no-index PK validator; see loader limitation below |
+| Checkpoint and writable WAL/shadow recovery | Enabled on Unix; writable startup explicitly adopts only validated exact companions; read-only startup does not adopt or create sidecars | Checkpoint/rollback, WAL replay, shadow application and close cleanup |
+| File / directory durability | File I/O/sync uses validated descriptors; every supported name creation/rename/unlink syncs the held directory, revalidating ancestors before and after sync; WAL replay uses that handle, with no pathname reopen or ambient `.` fallback | Durability/identity errors throw, not success; directory-sync failure permanently poisons the capability |
+| Copy/overwrite, createDir, glob, expandPath | Still refused in restricted mode; no ambient fallback. These flows need no directory-creation primitive | Later E01 slices |
+| Alternative VFS registration/dispatch | Still refused; only local rooted handles supported | Later E01 dispatch slice |
+| Windows capability / restricted construction | Unsupported, fails closed before database I/O | E02 |
 
-Canonicalization is only root acquisition. The regular-file probe is not an authorization
-for a later pathname open: every open checks again under the held directory.
+### Companion ownership and publication
+
+The fixed companion set is derived from `StorageUtils::getCompanionFilePaths` and its existing
+name helpers: `<db>.wal`, `.wal.checkpoint`, `.shadow`, `.tmp`, `.checkpoint.intent.lock` and
+`.checkpoint.apply.lock`. No wildcard, graph stem, prefix or extension-directory permission
+participates in rooted deletion. `.lock`, `.checkpoint` and unrelated/tagged stems are not
+implicitly added to this set. Graph/partition children remain unsupported for rooted name
+mutation; a request outside the session's supported names refuses.
+
+Rename sources must be the selected database basename or one of its six exact companions,
+as well as owned. An owned graph child, another database stem, or another arbitrary newly
+created name is not a source permission. This keeps graph/partition child mutations refused.
+
+A probe or an open of an existing file alone does not grant mutation ownership. A newly
+created rooted file is owned by that capability. Writable recovery explicitly adopts only the
+fixed companion names, after no-follow regular/single-link/remembered-identity checks and an
+owner match with the held root. Rename validates both endpoints immediately before the
+anchored operation, then explicitly updates the identity and ownership maps. Replacement
+is allowed only for an exact companion already owned by that capability. Publication into
+any other existing destination refuses, even if that destination is owned.
+
+Absent-destination rename uses Linux `renameat2(RENAME_NOREPLACE)` or macOS
+`renameatx_np(RENAME_EXCL)`. **Kernel and filesystem support is required.** Unsupported
+`EINVAL`, `ENOSYS`, `ENOTSUP`, or other syscall failures raise `IOException`; there is no
+check-then-rename fallback. Directory sync failures likewise return an error; callers must
+not treat that operation as a successful durable publication.
+
+A capability has one shared directory-durability state: `UNSYNCED`, `SYNCED`, or `POISONED`.
+It starts unsynced. Its first durable file sync establishes held-directory durability first;
+successful name-change directory sync also establishes that state. Later file syncs do not
+repeat the initial directory sync. Any directory-sync error, including identity failure
+before/after that sync, permanently poisons the capability. Fault removal is not a retry
+permission: every later rooted name/probe/open operation and every LocalFileSystem file sync,
+including already-held WAL handles, refuses. File sync checks the shared capability before
+I/O and again before returning success, so poison arriving during that sync is refused too.
+Recovery requires a fresh capability, which must independently establish directory durability
+before its first durable file sync. State is not copied per file handle.
+
+### Generated bulk temp files
+
+The name helper lives in `StorageUtils`: `<db>.pk_validator.<counter>.tmp`. Only the engine's
+allocator generates these names, creates them with anchored `O_CREAT|O_EXCL`, checks their
+identity, and registers them for this capability. Existing entries are never opened/adopted
+by the allocator: `EEXIST` advances the counter, with 16 attempts per allocation before a
+typed refusal. A normal rooted open or a pattern match does not register a generated temp.
+Removal requires its registration and remembered identity; successful unlink revokes both.
+
+**Crash-left generated temps leak safely.** A later session never adopts or automatically
+removes them. Receipt-backed anchored cleanup belongs to E10. The six fixed companions have
+the distinct, explicit writable-recovery adoption contract above.
 
 ## Caller audit and remaining direct access
 
-Run `bash scripts/audit-native-filesystem.sh` on the candidate revision. It inventories native
-operation calls and direct filesystem/stream calls throughout `lbug-src/src`; review new hits
-against this table. This diagnostic scan is not a claim that deferred rows are safe.
+Run `bash scripts/audit-native-filesystem.sh` on the candidate revision. The diagnostic scan
+includes direct Unix rename-family/syscall calls; new hits require operation/caller review.
+The scan has **629 hits**, versus 616 at the E01a baseline. Both scans exit 0; the full
+candidate output and exact command are recorded in the E01b report. This scan does not qualify deferred
+rows.
 
-- WAL directory durability's direct `open` in `storage/wal/wal_replayer.cpp` remains a later row;
-  current restricted remove/rename failure prevents the implemented path from reaching it.
-- Spill/checkpoint/delete/rename are the next E01 slice. Rooted mode disables eager spill setup;
-  `BufferManager::resetSpiller` refuses activation explicitly without a temp file. Existing
-  unrestricted spill behavior is unchanged. Rooted `removeFileIfExists` always throws, so
-  successful startup is the behavioral oracle that it did not call deletion (no production
-  counting hook). Tests snapshot sibling entries and the root parent's names/sizes/mtimes;
-  the application-owned root itself is intentionally excluded because its contents change.
-- E01a exercises an empty database create/read-only reopen and sidecar handle opens, plus a
-  tiny SQL write with checkpoint disabled and a read-only WAL reopen seeing that row. Pending
-  WAL/shadow writable recovery is refused at startup; explicit checkpoint reaches a closed
-  unsupported primitive. Full checkpoint/crash recovery, companion deletion/enumeration,
-  immutable publication and directory durability remain unqualified later slices.
-- Extension dynamic loads/recursive uninstall, COPY/import/export, ATTACH/DETACH and direct NPY
-  mapping still require their dedicated restricted refusals. Do not expose those queries in an
-  interim deployment. Static `LocalFileSystem::fileExists` remains an unrestricted API for the
-  legacy binder; the later query-refusal slice must prevent that path in restricted mode.
-- Existing file read/write/seek/truncate/size/sync methods use the validated handle. Full WAL
-  directory sync and publication durability are deferred, not inferred from these file checks.
+- WAL replay's former direct directory `open` moved behind `FileSystem::syncDirectoryForFile`.
+  Its unrestricted implementation retains legacy behavior; rooted calls select the held
+  directory before that branch. No restricted remove/rename path reopens a parent pathname.
+- The tests drive the actual `NodeBatchInsert` no-index PK validator through its internal
+  operator constructor, using real chunks and a one-byte spill threshold. The factory is in
+  the internal `batch_insert` namespace, not a new exported/public API or a test-only branch.
+  Prepared ordinary writes map to `Insert`; `NodeBatchInsert` is reached by the COPY planner.
+  Rooted COPY's glob remains refused. **E07b must prove the prepared bound loader end to end**;
+  this operator-level bulk test is not that qualification.
+- Extension dynamic loads/recursive uninstall, COPY/import/export, ATTACH/DETACH and direct
+  NPY mapping still require E01c's query refusals. Do not expose these queries in an interim
+  deployment. Static `LocalFileSystem::fileExists` remains unrestricted for the legacy binder.
+- Copy/overwrite, directory creation, query refusals, alternative-VFS dispatch, Windows safety
+  and `build.rs` are unchanged by E01b.
 
 ## Tests
 
-`cmake -S tests/native_safety -B target/native-safety -DCMAKE_BUILD_TYPE=Release`,
-`cmake --build target/native-safety --parallel 3`, and
-`ctest --test-dir target/native-safety --output-on-failure` exercise the native operations.
-Rust constructor tests run with `cargo test --no-default-features native_safety_tests` using
-bundled source (`LBUG_BUILD_FROM_SOURCE=1`). The three-OS workflow runs native tests, including
-Windows refusal. Source-default and cache qualification belong to E03/E03b; `build.rs` is
-unchanged in E01a.
+Configure `tests/native_safety` into `target/native-safety`, build with `--parallel 3`, and run
+CTest with `--verbose --output-on-failure`. The three executables cover E01a opens/locks and
+closed seams, E01b rename/remove/adoption/durability operations, and the full native flows.
+Outside sentinel bytes and identity are checked. Tests exercise ancestor swaps, links,
+existing destinations, aliases, unrelated stems, directories, replaced/disappeared identities,
+atomic destination races, syscall/durability failures and generated-temp collisions/cleanup.
+
+Flow tests exercise forced-memory-pressure spill/reload/reset/close, actual bulk PK spill and
+duplicate-run failure cleanup, rollback, repeated/automatic/default-close checkpoints,
+read-only WAL replay without writable adoption, and `SIGKILL`/fresh-capability reopen after
+WAL commit, WAL rename, checkpoint-record sync (before shadow application), and completed
+checkpoint. Read-only opens preserve entries and create no sidecars. The existing `CALL spill_to_disk`
+setter already refuses enabling spill for read-only databases. The native buffer-manager
+reset additionally retains the constructor's read-only mode: non-empty rooted read-only
+reset refuses before constructing a spiller, empty disable is allowed, and writable rooted
+reset remains live. Unrestricted reset behavior remains upstream. Tests force read-only
+memory exhaustion after refusal and assert that no directory entry appeared.
+
+Only the native CMake harness compiles deterministic interleave/syscall-fault/crash callbacks;
+ordinary bundled builds do not include them. Reused native archives leave callbacks inert
+unless the harness installs them. Rust constructor tests additionally exercise writable
+recovery, rollback, checkpoint and read-only reopen using the same source-built archive.
+The three-OS workflow runs the native and Rust suites; Windows still proves refusal.

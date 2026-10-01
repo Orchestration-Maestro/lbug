@@ -1,6 +1,7 @@
 #pragma once
 
 #include <filesystem>
+#include <memory>
 #include <vector>
 
 #include "common/assert.h"
@@ -13,6 +14,8 @@ class ClientContext;
 } // namespace main
 
 namespace common {
+
+class RootDirectory;
 
 enum class FileLockType : uint8_t { NO_LOCK = 0, READ_LOCK = 1, WRITE_LOCK = 2 };
 
@@ -68,6 +71,11 @@ public:
     virtual void overwriteFile(const std::string& from, const std::string& to);
 
     virtual void renameFile(const std::string& from, const std::string& to);
+
+    // Explicit writable-session recovery adoption; never called by read-only opens.
+    void adoptCompanionFiles();
+    std::unique_ptr<FileInfo> createPKValidatorSpillFile(const std::string& databasePath);
+    virtual void syncDirectoryForFile(const std::string& path) const;
 
     virtual void copyFile(const std::string& from, const std::string& to);
 
@@ -133,6 +141,7 @@ protected:
 
     std::string dbPath;
     bool restrictedMode = false;
+    std::shared_ptr<RootDirectory> root;
 };
 
 } // namespace common

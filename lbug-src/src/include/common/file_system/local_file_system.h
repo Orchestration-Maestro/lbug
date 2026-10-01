@@ -75,7 +75,6 @@ protected:
 
 private:
     void requireUnrestricted(const char* operation) const;
-    std::shared_ptr<RootDirectory> root;
 };
 
 } // namespace common

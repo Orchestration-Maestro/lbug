@@ -34,6 +34,12 @@ struct NoIndexPKValidator {
     virtual void finalize() {}
 };
 
+namespace batch_insert {
+// Internal constructor used by NodeBatchInsert's no-index validation path.
+std::unique_ptr<NoIndexPKValidator> createNoIndexPKValidator(const common::LogicalType& pkType,
+    main::ClientContext* clientContext);
+}
+
 struct NodeBatchInsertPrintInfo final : OPPrintInfo {
     std::string tableName;
 

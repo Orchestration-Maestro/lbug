@@ -120,12 +120,6 @@ void Database::initMembers(std::string_view dbPath, construct_bm_func_t initBmFu
         databasePath = dbPathStr;
         // The narrow startup probe rejects a directory rather than recursively adopting it.
         rootDirectory->probeRegularFile(databasePath);
-        if (!dbConfig->readOnly &&
-            (rootDirectory->probeRegularFile(StorageUtils::getWALFilePath(databasePath)) ||
-                rootDirectory->probeRegularFile(StorageUtils::getCheckpointWALFilePath(databasePath)) ||
-                rootDirectory->probeRegularFile(StorageUtils::getShadowFilePath(databasePath)))) {
-            throw RuntimeException("Restricted writable WAL recovery is unsupported in E01a.");
-        }
         vfs = std::make_unique<VirtualFileSystem>(databasePath, rootDirectory);
     } else {
         databasePath = StorageUtils::expandPath(&clientContext, dbPathStr);
@@ -135,6 +129,7 @@ void Database::initMembers(std::string_view dbPath, construct_bm_func_t initBmFu
         }
         vfs = std::make_unique<VirtualFileSystem>(databasePath);
     }
+    if (rootDirectory && !dbConfig->readOnly) { vfs->adoptCompanionFiles(); }
     validatePathInReadOnly();
 
     bufferManager = initBmFunc(*this);

@@ -301,6 +301,7 @@ private:
     std::vector<std::unique_ptr<FileHandle>> fileHandles;
     std::unique_ptr<Spiller> spiller;
     common::VirtualFileSystem* vfs;
+    const bool readOnly;
 };
 
 } // namespace storage

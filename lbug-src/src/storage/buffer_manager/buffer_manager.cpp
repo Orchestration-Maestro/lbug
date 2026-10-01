@@ -77,7 +77,7 @@ bool EvictionQueue::tryClear(std::atomic<EvictionCandidate>& candidate,
 BufferManager::BufferManager(const std::string& databasePath, const std::string& spillToDiskPath,
     uint64_t bufferPoolSize, uint64_t maxDBSize, VirtualFileSystem* vfs, bool readOnly)
     : bufferPoolSize{bufferPoolSize}, evictionQueue{bufferPoolSize / LBUG_PAGE_SIZE},
-      usedMemory{evictionQueue.getCapacity() * sizeof(EvictionCandidate)}, vfs{vfs} {
+      usedMemory{evictionQueue.getCapacity() * sizeof(EvictionCandidate)}, vfs{vfs}, readOnly{readOnly} {
     verifySizeParams(bufferPoolSize, maxDBSize);
 #if !BM_MALLOC
     vmRegions[0] = std::make_unique<VMRegion>(REGULAR_PAGE, maxDBSize);
@@ -90,7 +90,7 @@ BufferManager::BufferManager(const std::string& databasePath, const std::string&
     // as /var/tmp (not /tmp since that may be backed by memory). However we also need to be able to
     // support multiple databases spilling at once (can't be the same file), and handle different
     // platforms.
-    if (!readOnly && !vfs->isRestricted() && !main::DBConfig::isDBPathInMemory(databasePath) &&
+    if (!readOnly && !main::DBConfig::isDBPathInMemory(databasePath) &&
         dynamic_cast<LocalFileSystem*>(vfs->findFileSystem(spillToDiskPath))) {
         spiller = std::make_unique<Spiller>(spillToDiskPath, *this, vfs);
     }
@@ -613,8 +613,9 @@ uint64_t BufferManager::freeUsedMemory(uint64_t size) {
 }
 
 void BufferManager::resetSpiller(std::string spillPath) {
-    if (!spillPath.empty() && vfs->isRestricted()) {
-        throw BufferManagerException("restricted spill unsupported in E01a.");
+    // Keep the constructor's read-only contract even if a native caller bypasses the CALL guard.
+    if (!spillPath.empty() && readOnly && vfs->isRestricted()) {
+        throw BufferManagerException("Restricted read-only spill reset is unsupported.");
     }
     if (spillPath.empty()) {
         // Disable spilling to disk;
