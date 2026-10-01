@@ -219,3 +219,73 @@ jobs:
             "Temporary account and profile removed: $env:PROBE_USER"
           }
           if ($env:PROBE_ROOT -and (Test-Path $env:PROBE_ROOT)) { Remove-Item -Recurse -Force $env:PROBE_ROOT }
+
+  rooted-read-only:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: 3
+      CARGO_BUILD_JOBS: 3
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Activate Visual Studio
+        shell: pwsh
+        run: |
+          $before = @{}
+          Get-ChildItem Env: | ForEach-Object { $before[$_.Name] = $_.Value }
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          $install = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          Import-Module (Join-Path $install 'Common7/Tools/Microsoft.VisualStudio.DevShell.dll')
+          Enter-VsDevShell -VsInstallPath $install -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
+          Get-ChildItem Env: | Where-Object { $before[$_.Name] -ne $_.Value } | ForEach-Object { "$($_.Name)=$($_.Value)" >> $env:GITHUB_ENV }
+      - name: Build the real rooted engine
+        shell: pwsh
+        run: |
+          cmake -S tests/native_safety -B target/native-safety -DCMAKE_BUILD_TYPE=Release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build target/native-safety --config Release --target maestro_windows_root --parallel 3
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Run rooted read-only tests as a standard user
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = "C:\Users\Public\MaestroE02c-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          "ROOT_SCRATCH=$root" >> $env:GITHUB_ENV
+          New-Item -ItemType Directory -Force $root, target/windows-root-evidence | Out-Null
+          $name = 'e02c' + [guid]::NewGuid().ToString('N').Substring(0, 15)
+          $password = [Security.SecureString]::new()
+          ('Aa1!' + [Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(32))).ToCharArray() | ForEach-Object { $password.AppendChar($_) }
+          $password.MakeReadOnly()
+          "ROOT_USER=$name" >> $env:GITHUB_ENV
+          $user = New-LocalUser -Name $name -Password $password
+          "ROOT_SID=$($user.SID.Value)" >> $env:GITHUB_ENV
+          Add-LocalGroupMember -Group (Get-LocalGroup -SID 'S-1-5-32-545') -Member $user
+          icacls $root /grant "*$($user.SID.Value):(OI)(CI)F" '*S-1-5-32-545:(OI)(CI)RX'
+          if ($LASTEXITCODE -ne 0) { throw 'Scratch grant failed' }
+          $credential = [pscredential]::new("$env:COMPUTERNAME\$name", $password)
+          $exe = Join-Path $root 'maestro_windows_root.exe'
+          Copy-Item target/native-safety/Release/maestro_windows_root.exe $exe
+          $stdout = Join-Path $root 'root.stdout.txt'
+          $stderr = Join-Path $root 'root.stderr.txt'
+          $child = Start-Process -FilePath $exe -ArgumentList @($root) -WorkingDirectory $root -Credential $credential -LoadUserProfile -Wait -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+          Get-Content $stdout, $stderr | Tee-Object target/windows-root-evidence/root.txt | Out-Host
+          "exit=$($child.ExitCode)" | Set-Content target/windows-root-evidence/exit.txt
+          git rev-parse HEAD | Set-Content target/windows-root-evidence/tested-sha.txt
+          if ($child.ExitCode -ne 0) { throw 'Root suite failed' }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: windows-root-${{ github.sha }}
+          path: target/windows-root-evidence
+          if-no-files-found: error
+      - name: Remove temporary account
+        if: always()
+        shell: pwsh
+        run: |
+          if ($env:ROOT_USER) {
+            Remove-LocalUser -Name $env:ROOT_USER -ErrorAction Stop
+            Get-CimInstance Win32_UserProfile | Where-Object SID -eq $env:ROOT_SID | Remove-CimInstance -ErrorAction Stop
+          }
+          if ($env:ROOT_SCRATCH -and (Test-Path $env:ROOT_SCRATCH)) { Remove-Item -Recurse -Force $env:ROOT_SCRATCH }
