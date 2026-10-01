@@ -1,3 +1,4 @@
+#include "binder/rooted_query_refusal.h"
 #include "common/file_system/virtual_file_system.h"
 #include "common/serializer/buffer_writer.h"
 #include "function/cast/vector_cast_functions.h"
@@ -113,6 +114,7 @@ struct ExportCSVSharedState : public ExportFuncSharedState {
     ExportCSVSharedState() = default;
 
     void init(main::ClientContext& context, const ExportFuncBindData& bindData) override {
+        binder::refuseRootedQuery(context, StatementType::COPY_TO);
         fileInfo = VirtualFileSystem::GetUnsafe(context)->openFile(bindData.fileName,
             FileOpenFlags(FileFlags::WRITE | FileFlags::CREATE_AND_TRUNCATE_IF_EXISTS), &context);
         writeHeader(bindData);

@@ -1,5 +1,6 @@
 #include "binder/binder.h"
 #include "binder/bound_scan_source.h"
+#include "binder/rooted_query_refusal.h"
 #include "binder/expression/literal_expression.h"
 #include "binder/expression/parameter_expression.h"
 #include "common/exception/binder.h"
@@ -131,6 +132,7 @@ bool handleFileViaFunction(main::ClientContext* context, std::vector<std::string
 std::unique_ptr<BoundBaseScanSource> Binder::bindFileScanSource(const BaseScanSource& scanSource,
     const options_t& options, const std::vector<std::string>& columnNames,
     const std::vector<LogicalType>& columnTypes) {
+    refuseRootedQuery(*clientContext, ScanSourceType::FILE);
     auto fileSource = scanSource.constPtrCast<FileScanSource>();
     auto boundOptions = bindParsingOptions(options);
     auto formatOption = boundOptions.find(FileScanInfo::FILE_FORMAT_OPTION_NAME);

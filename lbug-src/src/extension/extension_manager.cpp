@@ -1,5 +1,7 @@
 #include "extension/extension_manager.h"
 
+#include "binder/rooted_query_refusal.h"
+
 #include "common/file_system/virtual_file_system.h"
 #include "common/string_utils.h"
 #include "extension/extension.h"
@@ -20,6 +22,7 @@ static void executeExtensionLoader(main::ClientContext* context, const std::stri
 }
 
 void ExtensionManager::loadExtension(const std::string& path, main::ClientContext* context) {
+    binder::refuseRootedQuery(*context, ExtensionAction::LOAD);
     auto fullPath = path;
     bool isOfficial = ExtensionUtils::isOfficialExtension(path);
     if (isOfficial) {

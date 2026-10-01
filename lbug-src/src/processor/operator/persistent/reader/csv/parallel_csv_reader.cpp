@@ -3,6 +3,7 @@
 #include <cmath>
 
 #include "binder/binder.h"
+#include "binder/rooted_query_refusal.h"
 #include "common/constants.h"
 #include "common/file_system/virtual_file_system.h"
 #include "function/table/bind_data.h"
@@ -299,6 +300,7 @@ static offset_t tableFunc(const TableFuncInput& input, TableFuncOutput& output) 
 
 static std::unique_ptr<TableFuncBindData> bindFunc(main::ClientContext* context,
     const TableFuncBindInput* input) {
+    binder::refuseRootedQuery(*context, std::string_view{ParallelCSVScan::name});
     auto scanInput = dynamic_cast_checked<ExtraScanTableFuncBindInput*>(input->extraInput.get());
     bool detectedHeader = false;
 
@@ -350,6 +352,7 @@ static std::unique_ptr<TableFuncBindData> bindFunc(main::ClientContext* context,
 
 static std::unique_ptr<TableFuncSharedState> initSharedState(
     const TableFuncInitSharedStateInput& input) {
+    binder::refuseRootedQuery(*input.context->clientContext, std::string_view{ParallelCSVScan::name});
     auto bindData = input.bindData->constPtrCast<ScanFileBindData>();
     auto csvConfig = CSVReaderConfig::construct(bindData->fileScanInfo.options);
     auto csvOption = csvConfig.option.copy();

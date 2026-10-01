@@ -1,5 +1,6 @@
 #include "processor/operator/simple/detach_database.h"
 
+#include "binder/rooted_query_refusal.h"
 #include "main/client_context.h"
 #include "main/database.h"
 #include "main/database_manager.h"
@@ -15,6 +16,7 @@ std::string DetatchDatabasePrintInfo::toString() const {
 
 void DetachDatabase::executeInternal(ExecutionContext* context) {
     auto clientContext = context->clientContext;
+    binder::refuseRootedQuery(*clientContext, common::StatementType::DETACH_DATABASE);
     auto dbManager = main::DatabaseManager::Get(*clientContext);
     dbManager->detachDatabase(dbName);
     appendMessage("Detached database successfully.", storage::MemoryManager::Get(*clientContext));

@@ -1,6 +1,7 @@
 #include "binder/binder.h"
 
 #include "binder/bound_statement_rewriter.h"
+#include "binder/rooted_query_refusal.h"
 #include "catalog/catalog.h"
 #include "common/copier_config/csv_reader_config.h"
 #include "common/exception/binder.h"
@@ -25,6 +26,7 @@ namespace lbug {
 namespace binder {
 
 std::unique_ptr<BoundStatement> Binder::bind(const Statement& statement) {
+    refuseRootedQuery(*clientContext, statement.getStatementType());
     std::unique_ptr<BoundStatement> boundStatement;
     switch (statement.getStatementType()) {
     case StatementType::CREATE_TABLE: {

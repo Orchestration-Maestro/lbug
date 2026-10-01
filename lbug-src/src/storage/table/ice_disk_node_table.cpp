@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <mutex>
 
+#include "binder/rooted_query_refusal.h"
 #include "catalog/catalog_entry/node_table_catalog_entry.h"
 #include "common/data_chunk/sel_vector.h"
 #include "common/exception/runtime.h"
@@ -30,6 +31,7 @@ IceDiskNodeTable::IceDiskNodeTable(const StorageManager* storageManager,
     main::ClientContext* context)
     : ColumnarNodeTableBase{storageManager, nodeTableEntry, memoryManager,
           std::make_unique<IceDiskNodeTableScanSharedState>()} {
+    binder::refuseRootedQuery(*context, StorageFormat::ICEBUG_DISK);
     const auto& storage = nodeTableEntry->getStorage();
     auto path =
         common::StringUtils::getLower(storage).ends_with("parquet") ?

@@ -1,5 +1,6 @@
 #include "main/attached_database.h"
 
+#include "binder/rooted_query_refusal.h"
 #include "common/exception/runtime.h"
 #include "common/file_system/virtual_file_system.h"
 #include "main/client_context.h"
@@ -49,6 +50,7 @@ static void validateEmptyWAL(const std::string& path, ClientContext* context) {
 AttachedLbugDatabase::AttachedLbugDatabase(std::string dbPath, std::string dbName,
     std::string dbType, ClientContext* clientContext)
     : AttachedDatabase{std::move(dbName), std::move(dbType), nullptr /* catalog */} {
+    binder::refuseRootedQuery(*clientContext, common::StatementType::ATTACH_DATABASE);
     auto vfs = common::VirtualFileSystem::GetUnsafe(*clientContext);
     if (DBConfig::isDBPathInMemory(dbPath)) {
         throw common::RuntimeException("Cannot attach an in-memory Lbug database. Please give a "
