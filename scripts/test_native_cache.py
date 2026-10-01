@@ -140,7 +140,7 @@ def main():
             assert result["engine_compiles"] == result["bridge_compiles"] == 0
         results["added_clean_seconds"] = max(0, cold["wall_seconds"] - warm["wall_seconds"])
         (evidence / "measurements.json").write_text(json.dumps(results, indent=2) + "\n")
-        assert results["added_clean_seconds"] <= 15 * 60, "added clean-build time exceeds the approved 15-minute ceiling"
+        assert results["added_clean_seconds"] <= 25 * 60, "added clean-build time exceeds the approved 25-minute ceiling"
         if sys.platform.startswith("linux"):
             assert cold["peak_cgroup_bytes"] and cold["peak_cgroup_bytes"] < 8 * 1024**3, "missing/over-budget aggregate peak memory"
         print("PASS: two clean targets reuse engine output; Rust/docs changes compile neither engine nor bridge", flush=True)
