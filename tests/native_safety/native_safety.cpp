@@ -90,6 +90,23 @@ int main() {
     config.maxDBSize = 64 * 1024 * 1024;
     config.forceCheckpointOnClose = false;
     { lbug::main::Database fixture(windows_test::utf8(path / "db.lbdb"), config); }
+    BYTE admin[SECURITY_MAX_SID_SIZE]; DWORD adminSize = sizeof(admin); BOOL isAdmin = FALSE;
+    windows_test::require(CreateWellKnownSid(WinBuiltinAdministratorsSid, nullptr, admin, &adminSize) &&
+        CheckTokenMembership(nullptr, admin, &isAdmin), "SETUP administrator membership");
+    if (isAdmin) {
+        windows_test::setOwner(path / "db.lbdb", "S-1-5-32-544");
+        test("windows administrators-owned reader refuses", [&] {
+            auto root = RootDirectory::open(windows_test::utf8(path));
+            auto readOnly = config; readOnly.readOnly = true;
+            windows_test::Snapshot before(path / "db.lbdb");
+            refused([&] { lbug::main::Database db(root, "db.lbdb", readOnly); }, "current-user owner");
+            before.unchanged(path / "db.lbdb");
+            sentinel.unchanged(parent / "outside");
+        });
+    } else {
+        std::cout << "ADMIN_OWNER_NEIGHBOUR_NOT_APPLICABLE_STANDARD_TOKEN\n";
+    }
+    windows_test::setOwner(path / "db.lbdb", windows_test::user());
     test("windows read-only rooted construction succeeds", [&] {
         auto root = RootDirectory::open(windows_test::utf8(path));
         auto readOnly = config; readOnly.readOnly = true;

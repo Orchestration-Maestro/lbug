@@ -82,6 +82,7 @@ int main(int argc, char** argv) {
             require(connection.query("CREATE (:Item {id: 7})")->isSuccess(), "SETUP row");
             require(connection.query("CHECKPOINT")->isSuccess(), "SETUP checkpoint");
         }
+        setOwner(path / "db.lbdb", user());
         config.readOnly = true;
         unsigned failures = 0, count = 0;
         auto test = [&](const char* name, const std::function<void()>& action) {

@@ -86,6 +86,22 @@ inline void makePrivate(const fs::path& path) {
     LocalFree(sd);
     require(error == ERROR_SUCCESS, "SETUP private root error=" + std::to_string(error));
 }
+// Fixture setup only: change only OWNER_SECURITY_INFORMATION and verify the actual owner.
+inline void setOwner(const fs::path& path, const std::string& sid) {
+    auto h = hold(CreateFileW(path.c_str(), READ_CONTROL | WRITE_OWNER,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr));
+    PSID expected = nullptr;
+    require(ConvertStringSidToSidA(sid.c_str(), &expected), "SETUP owner SID");
+    auto error = SetSecurityInfo(h.get(), SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION,
+        expected, nullptr, nullptr, nullptr);
+    PSECURITY_DESCRIPTOR descriptor = nullptr; PSID actual = nullptr;
+    auto query = GetSecurityInfo(h.get(), SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION,
+        &actual, nullptr, nullptr, nullptr, &descriptor);
+    const bool equal = query == ERROR_SUCCESS && actual && EqualSid(expected, actual);
+    LocalFree(descriptor); LocalFree(expected);
+    require(error == ERROR_SUCCESS, "SETUP owner-only change error=" + std::to_string(error));
+    require(equal, "SETUP file owner does not equal requested SID " + sid);
+}
 inline std::string bytes(const fs::path& path) {
     std::ifstream in(path, std::ios::binary);
     require(in.good(), "SETUP read bytes");

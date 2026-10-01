@@ -329,6 +329,9 @@ foreach ($sid in @($user.Value, 'S-1-5-18', 'S-1-5-32-544')) {
     $acl.AddAccessRule($rule)
 }
 Set-Acl -LiteralPath $path -AclObject $acl
+if ((Get-Acl -LiteralPath $path).GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $user.Value) {
+    throw 'SETUP root owner does not equal primary TokenUser'
+}
 ";
     let status = std::process::Command::new("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-Command", script])
@@ -336,6 +339,33 @@ Set-Acl -LiteralPath $path -AclObject $acl
         .status()?;
     anyhow::ensure!(status.success(), "Windows private-root fixture ACL failed");
     Ok(directory)
+}
+
+#[cfg(windows)]
+fn windows_set_fixture_file_owner(path: &std::path::Path) -> anyhow::Result<()> {
+    // Get-Acl starts with unmodified sections; SetOwner marks only the owner section for Set-Acl.
+    let script = r"
+$ErrorActionPreference = 'Stop'
+$path = $env:MAESTRO_TEST_PRIVATE_FILE
+$user = [Security.Principal.WindowsIdentity]::GetCurrent().User
+$acl = Get-Acl -LiteralPath $path
+$before = $acl.GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::Access)
+$acl.SetOwner($user)
+Set-Acl -LiteralPath $path -AclObject $acl
+$actual = Get-Acl -LiteralPath $path
+if ($actual.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $user.Value) {
+    throw 'SETUP reader file owner does not equal primary TokenUser'
+}
+if ($actual.GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::Access) -ne $before) {
+    throw 'SETUP owner-only change modified the DACL'
+}
+";
+    let status = std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .env("MAESTRO_TEST_PRIVATE_FILE", path)
+        .status()?;
+    anyhow::ensure!(status.success(), "Windows reader owner fixture failed");
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -353,6 +383,9 @@ fn windows_rooted_read_only_roundtrip_and_wrapper_lifetime() -> anyhow::Result<(
         connection.query("CREATE NODE TABLE Item(id INT64, PRIMARY KEY(id))")?;
         connection.query("CREATE (:Item {id: 7})")?;
         connection.query("CHECKPOINT")?;
+    }
+    for entry in std::fs::read_dir(directory.path())? {
+        windows_set_fixture_file_owner(&entry?.path())?;
     }
     let listing = || -> anyhow::Result<std::collections::BTreeSet<std::ffi::OsString>> {
         Ok(std::fs::read_dir(directory.path())?

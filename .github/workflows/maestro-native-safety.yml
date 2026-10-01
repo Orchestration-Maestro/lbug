@@ -135,6 +135,13 @@ jobs:
         run: cmake --build target/native-safety --config Release --parallel 3
       - name: Run native tests (standard-user Windows root runs in the focused job)
         run: ctest --test-dir target/native-safety --build-config Release -E '^maestro_windows_root$' --verbose --output-on-failure
+      - name: Require the real administrator-owned reader refusal on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (!(Select-String -Path target/native-safety/Testing/Temporary/LastTest.log -SimpleMatch 'PASS windows administrators-owned reader refuses' -Quiet)) {
+            throw 'Administrator-owned reader neighbour did not execute'
+          }
       - name: Rust constructor tests using the same source-built archive (Unix)
         if: runner.os != 'Windows'
         shell: bash
