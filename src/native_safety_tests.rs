@@ -56,6 +56,10 @@ fn fixture() -> anyhow::Result<(tempfile::TempDir, std::path::PathBuf, std::path
     let sibling = directory.path().join("outside");
     std::fs::create_dir_all(&root)?;
     std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))?;
+    anyhow::ensure!(
+        std::fs::metadata(&root)?.permissions().mode() & 0o7777 == 0o700,
+        "fixture root is not exactly 0700"
+    );
     std::fs::create_dir(&sibling)?;
     std::fs::write(sibling.join("sentinel"), b"outside sentinel")?;
     Ok((directory, root, sibling))
