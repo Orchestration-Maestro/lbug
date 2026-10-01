@@ -25,10 +25,6 @@
 #include "storage/wal/wal_record.h"
 #include "transaction/transaction_context.h"
 #include <format>
-#ifndef _WIN32
-#include <fcntl.h>
-#include <unistd.h>
-#endif
 
 using namespace lbug::common;
 using namespace lbug::storage;
@@ -81,33 +77,6 @@ static void removePartitionChildShadowFiles(main::ClientContext& clientContext) 
         vfs->removeFileIfExists(StorageUtils::getShadowFilePath(sm->getDatabasePath()),
             &clientContext);
     }
-}
-
-static void syncParentDirectoryForLocalPath(const std::string& path) {
-#ifdef _WIN32
-    (void)path;
-#else
-    if (!LocalFileSystem::isLocalPath(path)) {
-        return;
-    }
-    auto parentPath = std::filesystem::path(path).parent_path();
-    if (parentPath.empty()) {
-        parentPath = ".";
-    }
-    const int dirFd = open(parentPath.c_str(), O_RDONLY | O_DIRECTORY);
-    if (dirFd < 0) {
-        throw IOException(std::format("Failed to open parent directory {} for sync: {}",
-            parentPath.string(), posixErrMessage()));
-    }
-    if (fsync(dirFd) != 0) {
-        const auto errorMessage = posixErrMessage();
-        close(dirFd);
-        throw IOException(
-            std::format("Failed to sync parent directory {} after removing file {}: {}",
-                parentPath.string(), path, errorMessage));
-    }
-    close(dirFd);
-#endif
 }
 
 WALReplayer::WALReplayer(main::ClientContext& clientContext) : clientContext{clientContext} {
@@ -442,13 +411,13 @@ void WALReplayer::removeWALAndShadowFiles(const std::string& walFilePath) const 
     const bool walRemoved = removeFileIfExists(walFilePath);
     const bool shadowRemoved = removeFileIfExists(shadowFilePath);
     if (walRemoved || shadowRemoved) {
-        syncParentDirectoryForLocalPath(walRemoved ? walFilePath : shadowFilePath);
+        VirtualFileSystem::GetUnsafe(clientContext)->syncDirectoryForFile(walRemoved ? walFilePath : shadowFilePath);
     }
 }
 
 void WALReplayer::removeFileAndSyncParentDirectory(const std::string& path) const {
     if (removeFileIfExists(path)) {
-        syncParentDirectoryForLocalPath(path);
+        VirtualFileSystem::GetUnsafe(clientContext)->syncDirectoryForFile(path);
     }
 }
 

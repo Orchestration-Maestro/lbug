@@ -23,8 +23,16 @@ public:
     // until after identity validation and native lock acquisition.
     int openFile(const std::string& name, int flags);
     bool probeRegularFile(const std::string& name);
-
 private:
+    friend class FileSystem;
+    friend class LocalFileSystem;
+    void adoptFileIfExists(const std::string& name);
+    std::string createSessionTempFile(const std::string& databaseName);
+    void renameFile(const std::string& from, const std::string& to, bool replaceCompanion);
+    void removeFile(const std::string& name, bool exactCompanion);
+    void syncDirectory();
+    void prepareFileSync();
+
     RootDirectory();
     struct State;
     std::unique_ptr<State> state;

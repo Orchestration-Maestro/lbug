@@ -7,6 +7,8 @@
 #include "glob/glob.hpp"
 #include "main/client_context.h"
 #include "main/settings.h"
+#include "storage/storage_utils.h"
+#include <algorithm>
 
 #if defined(_WIN32)
 #include <sys/stat.h>
@@ -28,6 +30,12 @@
 
 namespace lbug {
 namespace common {
+#if defined(MAESTRO_NATIVE_OPEN_TEST) && !defined(_WIN32)
+extern int (*maestroRestrictedCall)(const char*, int, const char*, struct stat*);
+static void nativeFileSyncPoint(const FileInfo& fileInfo) {
+    if (maestroRestrictedCall) { maestroRestrictedCall("file-sync", -1, fileInfo.path.c_str(), nullptr); }
+}
+#endif
 
 LocalFileInfo::~LocalFileInfo() {
 #ifdef _WIN32
@@ -42,8 +50,10 @@ LocalFileInfo::~LocalFileInfo() {
 }
 
 LocalFileSystem::LocalFileSystem(std::string name, std::shared_ptr<RootDirectory> root)
-    : FileSystem(std::move(name)), root{std::move(root)} {
+    : FileSystem(std::move(name)) {
+    this->root = std::move(root);
     if (!this->root) { throw IOException("Restricted filesystem requires a root capability."); }
+    RootDirectory::validateName(dbPath);
     restrictedMode = true;
 }
 
@@ -250,13 +260,7 @@ std::vector<std::string> LocalFileSystem::glob(main::ClientContext* context,
 }
 
 void LocalFileSystem::renameFile(const std::string& from, const std::string& to) {
-    requireUnrestricted("renameFile");
-    std::error_code ec;
-    std::filesystem::rename(from, to, ec);
-    if (ec) {
-        throw IOException(
-            std::format("Error renaming file {} to {}. ErrorMessage: {}", from, to, ec.message()));
-    }
+    FileSystem::renameFile(from, to);
 }
 
 void LocalFileSystem::overwriteFile(const std::string& from, const std::string& to) {
@@ -371,7 +375,12 @@ static bool isExtensionFile(const main::ClientContext* context, const std::strin
 
 void LocalFileSystem::removeFileIfExists(const std::string& path,
     const main::ClientContext* context) {
-    requireUnrestricted("removeFileIfExists");
+    if (root) {
+        const auto companions = storage::StorageUtils::getCompanionFilePaths(dbPath);
+        const bool exactCompanion = std::find(companions.begin(), companions.end(), path) != companions.end();
+        root->removeFile(path, exactCompanion);
+        return;
+    }
     if (!isAllowedDeletionPath(path, dbPath) && !isExtensionFile(context, path)) {
         throw IOException(std::format(
             "Error: Path {} is not within the allowed list of files to be removed.", path));
@@ -561,6 +570,8 @@ void LocalFileSystem::writeFile(FileInfo& fileInfo, const uint8_t* buffer, uint6
 }
 
 void LocalFileSystem::syncFile(const FileInfo& fileInfo) const {
+    // Establish fresh directory durability and reject poison even for already-held handles.
+    if (root) { root->prepareFileSync(); }
     auto localFileInfo = fileInfo.constPtrCast<LocalFileInfo>();
 #if defined(_WIN32)
     // Note that `FlushFileBuffers` returns 0 when fails, while `fsync` returns 0 when succeeds.
@@ -574,6 +585,10 @@ void LocalFileSystem::syncFile(const FileInfo& fileInfo) const {
     // Try F_FULLFSYNC first on macOS/iOS, which is required to guarantee durability past power
     // failures.
     if (fcntl(localFileInfo->fd, F_FULLFSYNC) == 0) {
+#ifdef MAESTRO_NATIVE_OPEN_TEST
+        if (root) { nativeFileSyncPoint(fileInfo); }
+#endif
+        if (root) { root->prepareFileSync(); }
         return;
     }
     if (errno != ENOTSUP && errno != EINVAL) {
@@ -595,7 +610,11 @@ void LocalFileSystem::syncFile(const FileInfo& fileInfo) const {
     if (!syncSuccess) {
         throw IOException(std::format("Failed to sync file {}.", fileInfo.path));
     }
+#ifdef MAESTRO_NATIVE_OPEN_TEST
+    if (root) { nativeFileSyncPoint(fileInfo); }
 #endif
+#endif
+    if (root) { root->prepareFileSync(); }
 }
 
 int64_t LocalFileSystem::seek(FileInfo& fileInfo, uint64_t offset, int whence) const {

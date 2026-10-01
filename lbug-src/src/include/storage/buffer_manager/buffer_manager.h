@@ -209,11 +209,12 @@ public:
     void updateFrameIfPageIsInFrame(common::file_idx_t fileIdx, const uint8_t* newPage,
         common::page_idx_t pageIdx);
 
-    // For files that are managed by BM, their FileHandles should be created through this function.
+    // BM registers every FileHandle; rooted recovery may transfer an already-locked FileInfo.
     FileHandle* getFileHandle(const std::string& filePath, uint8_t flags,
-        common::VirtualFileSystem* vfs, main::ClientContext* context) {
-        fileHandles.emplace_back(
-            std::make_unique<FileHandle>(filePath, flags, this, fileHandles.size(), vfs, context));
+        common::VirtualFileSystem* vfs, main::ClientContext* context,
+        std::unique_ptr<common::FileInfo> lockedFileInfo = nullptr) {
+        fileHandles.emplace_back(std::make_unique<FileHandle>(filePath, flags, this,
+            fileHandles.size(), vfs, context, std::move(lockedFileInfo)));
         return fileHandles.back().get();
     }
 
@@ -301,6 +302,7 @@ private:
     std::vector<std::unique_ptr<FileHandle>> fileHandles;
     std::unique_ptr<Spiller> spiller;
     common::VirtualFileSystem* vfs;
+    const bool readOnly;
 };
 
 } // namespace storage

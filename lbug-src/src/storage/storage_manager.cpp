@@ -60,8 +60,9 @@ static void erasePartitionedParents(std::vector<NodeTableCatalogEntry*>& entries
 
 StorageManager::StorageManager(const std::string& databasePath, bool readOnly, bool enableChecksums,
     MemoryManager& memoryManager, bool enableCompression, bool enableDefaultHashIndex,
-    VirtualFileSystem* vfs)
-    : databasePath{databasePath}, readOnly{readOnly}, dataFH{nullptr}, memoryManager{memoryManager},
+    VirtualFileSystem* vfs, std::unique_ptr<FileInfo> recoveryDataFile)
+    : databasePath{databasePath}, readOnly{readOnly}, dataFH{nullptr},
+      recoveryDataFile{std::move(recoveryDataFile)}, memoryManager{memoryManager},
       enableCompression{enableCompression}, enableDefaultHashIndex{enableDefaultHashIndex},
       vfs_{vfs} {
     wal = std::make_unique<WAL>(databasePath, readOnly, enableChecksums, vfs);
@@ -80,6 +81,7 @@ StorageManager::StorageManager(const std::string& databasePath, bool readOnly, b
 StorageManager::~StorageManager() = default;
 
 void StorageManager::initDataFileHandle(VirtualFileSystem* vfs, main::ClientContext* context) {
+    if (vfs->isRestricted() && dataFH) { return; }
     if (inMemory) {
         dataFH = memoryManager.getBufferManager()->getFileHandle(databasePath,
             FileHandle::O_PERSISTENT_FILE_IN_MEM, vfs, context);
@@ -89,7 +91,8 @@ void StorageManager::initDataFileHandle(VirtualFileSystem* vfs, main::ClientCont
         if (!readOnly) {
             flag |= FileHandle::O_LOCKED_PERSISTENT_FILE;
         }
-        dataFH = memoryManager.getBufferManager()->getFileHandle(databasePath, flag, vfs, context);
+        dataFH = memoryManager.getBufferManager()->getFileHandle(databasePath, flag, vfs, context,
+            std::move(recoveryDataFile));
         if (dataFH->getNumPages() == 0) {
             if (!readOnly) {
                 // Reserve the first page for the database header.

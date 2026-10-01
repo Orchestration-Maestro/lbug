@@ -120,12 +120,6 @@ void Database::initMembers(std::string_view dbPath, construct_bm_func_t initBmFu
         databasePath = dbPathStr;
         // The narrow startup probe rejects a directory rather than recursively adopting it.
         rootDirectory->probeRegularFile(databasePath);
-        if (!dbConfig->readOnly &&
-            (rootDirectory->probeRegularFile(StorageUtils::getWALFilePath(databasePath)) ||
-                rootDirectory->probeRegularFile(StorageUtils::getCheckpointWALFilePath(databasePath)) ||
-                rootDirectory->probeRegularFile(StorageUtils::getShadowFilePath(databasePath)))) {
-            throw RuntimeException("Restricted writable WAL recovery is unsupported in E01a.");
-        }
         vfs = std::make_unique<VirtualFileSystem>(databasePath, rootDirectory);
     } else {
         databasePath = StorageUtils::expandPath(&clientContext, dbPathStr);
@@ -134,6 +128,14 @@ void Database::initMembers(std::string_view dbPath, construct_bm_func_t initBmFu
             throw RuntimeException("Database path cannot be a directory: " + databasePath);
         }
         vfs = std::make_unique<VirtualFileSystem>(databasePath);
+    }
+    // Rooted startup must hold this lock before adoption or eager spill cleanup.
+    std::unique_ptr<FileInfo> recoveryDataFile;
+    if (rootDirectory && !dbConfig->readOnly) {
+        recoveryDataFile = vfs->openFile(databasePath,
+            FileOpenFlags(FileFlags::READ_ONLY | FileFlags::WRITE | FileFlags::CREATE_IF_NOT_EXISTS,
+                FileLockType::WRITE_LOCK), &clientContext);
+        vfs->adoptCompanionFiles();
     }
     validatePathInReadOnly();
 
@@ -149,7 +151,7 @@ void Database::initMembers(std::string_view dbPath, construct_bm_func_t initBmFu
     catalog = std::make_unique<Catalog>();
     storageManager = std::make_unique<StorageManager>(databasePath, dbConfig->readOnly,
         dbConfig->enableChecksums, *memoryManager, dbConfig->enableCompression,
-        dbConfig->enableDefaultHashIndex, vfs.get());
+        dbConfig->enableDefaultHashIndex, vfs.get(), std::move(recoveryDataFile));
     transactionManager = std::make_unique<TransactionManager>(storageManager->getWAL());
     databaseManager = std::make_unique<DatabaseManager>();
 

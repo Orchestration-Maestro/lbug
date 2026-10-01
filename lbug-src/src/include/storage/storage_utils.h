@@ -3,6 +3,7 @@
 #include <cmath>
 #include <filesystem>
 #include <string>
+#include <vector>
 #include <type_traits>
 
 #include "common/constants.h"
@@ -85,6 +86,14 @@ public:
     }
     static std::string getTmpFilePath(const std::string& path) {
         return std::format("{}.{}", path, common::StorageConstants::TEMP_FILE_SUFFIX);
+    }
+    static std::string getPKValidatorSpillFilePath(const std::string& path, uint64_t counter) {
+        return std::format("{}.pk_validator.{}.tmp", path, counter);
+    }
+    static std::vector<std::string> getCompanionFilePaths(const std::string& path) {
+        return {getWALFilePath(path), getCheckpointWALFilePath(path), getShadowFilePath(path),
+            getTmpFilePath(path), getCheckpointIntentLockFilePath(path),
+            getCheckpointApplyLockFilePath(path)};
     }
     static std::string getGraphPath(const std::string& dbPath, const std::string& graphName) {
         auto path = std::filesystem::path(dbPath);

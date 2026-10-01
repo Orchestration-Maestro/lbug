@@ -75,13 +75,6 @@ constexpr uint64_t PK_VALIDATOR_RUN_READ_BUFFER_MIN = 4 * 1024;
 // Flush threshold for the string-run write buffer (bytes).
 constexpr uint64_t PK_VALIDATOR_WRITE_FLUSH_THRESHOLD = 1u << 20;
 
-// Produces a unique spill-file path next to the database file so that concurrent no-index COPYs
-// into different tables do not collide.
-std::string makePKValidatorSpillFilePath(const std::string& dbPath) {
-    static std::atomic<uint64_t> counter{0};
-    return std::format("{}.pk_validator.{}.tmp", dbPath, counter.fetch_add(1));
-}
-
 template<typename T>
 class PKRunReader {
     static constexpr bool kIsStringPK = std::same_as<T, string_t>;
@@ -151,15 +144,13 @@ template<typename T>
 struct NoIndexPKValidatorImpl final : NoIndexPKValidator {
     static constexpr bool kIsStringPK = std::same_as<T, string_t>;
 
-    NoIndexPKValidatorImpl(uint64_t spillThresholdBytes, std::string spillFilePath,
+    NoIndexPKValidatorImpl(uint64_t spillThresholdBytes, const std::string& spillDatabasePath,
         VirtualFileSystem* vfs)
-        : spillThresholdBytes{spillThresholdBytes}, spillFilePath{std::move(spillFilePath)},
-          vfs{vfs} {
-        if (!this->spillFilePath.empty()) {
+        : spillThresholdBytes{spillThresholdBytes}, vfs{vfs} {
+        if (!spillDatabasePath.empty()) {
             DASSERT(vfs != nullptr);
-            spillFile = vfs->openFile(this->spillFilePath,
-                FileOpenFlags{FileFlags::WRITE | FileFlags::READ_ONLY |
-                              FileFlags::CREATE_AND_TRUNCATE_IF_EXISTS});
+            spillFile = vfs->createPKValidatorSpillFile(spillDatabasePath);
+            this->spillFilePath = spillFile->path;
         }
     }
 
@@ -397,15 +388,18 @@ private:
     std::unique_ptr<FileInfo> spillFile;
 };
 
+} // namespace
+
+namespace batch_insert {
 std::unique_ptr<NoIndexPKValidator> createNoIndexPKValidator(const LogicalType& pkType,
     main::ClientContext* clientContext) {
     const auto threshold = clientContext->getClientConfig()->pkValidatorSpillThreshold;
-    std::string spillFilePath;
+    std::string spillDatabasePath;
     VirtualFileSystem* vfs = nullptr;
     if (threshold > 0 && !clientContext->isInMemory() &&
         clientContext->getDBConfig()->enableSpillingToDisk) {
         vfs = VirtualFileSystem::GetUnsafe(*clientContext);
-        spillFilePath = makePKValidatorSpillFilePath(clientContext->getDatabasePath());
+        spillDatabasePath = clientContext->getDatabasePath();
     }
     return TypeUtils::visit(pkType, [=]<typename T>(T) -> std::unique_ptr<NoIndexPKValidator> {
         if constexpr (std::same_as<T, bool> || std::same_as<T, int8_t> ||
@@ -415,14 +409,14 @@ std::unique_ptr<NoIndexPKValidator> createNoIndexPKValidator(const LogicalType& 
                       std::same_as<T, uint64_t> || std::same_as<T, int128_t> ||
                       std::same_as<T, uint128_t> || std::same_as<T, float> ||
                       std::same_as<T, double> || std::same_as<T, string_t>) {
-            return std::make_unique<NoIndexPKValidatorImpl<T>>(threshold, spillFilePath, vfs);
+            return std::make_unique<NoIndexPKValidatorImpl<T>>(threshold, spillDatabasePath, vfs);
         } else {
             return nullptr;
         }
     });
 }
 
-} // namespace
+} // namespace batch_insert
 
 std::string NodeBatchInsertPrintInfo::toString() const {
     std::string result = "Table Name: ";
@@ -457,7 +451,7 @@ void NodeBatchInsertSharedState::initTargetPKIndex(const ExecutionContext* conte
                 "a primary-key hash index.");
         }
         target.globalIndexBuilder.reset();
-        target.noIndexPKValidator = createNoIndexPKValidator(pkType, context->clientContext);
+        target.noIndexPKValidator = batch_insert::createNoIndexPKValidator(pkType, context->clientContext);
         target.usePrimaryKeyIndexCommitInsert = false;
         if (!target.noIndexPKValidator) {
             throw RuntimeException(ExceptionMessage::invalidPKType(pkType.toString()));

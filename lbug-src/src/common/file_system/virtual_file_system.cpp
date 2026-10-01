@@ -47,6 +47,8 @@ VirtualFileSystem::VirtualFileSystem(std::string homeDir) {
 
 VirtualFileSystem::VirtualFileSystem(std::string name, std::shared_ptr<RootDirectory> root) {
     restrictedMode = true;
+    dbPath = name;
+    this->root = root;
     defaultFS = std::make_unique<LocalFileSystem>(std::move(name), std::move(root));
 }
 
