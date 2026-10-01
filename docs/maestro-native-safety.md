@@ -12,6 +12,15 @@ Links in the root's own path are resolved then; that is the caller's trust decis
 macOS `/tmp` and `/var` and symlinked homes. The canonical path is walked component by component
 with no-follow, and every ancestor is held with its identity recorded.
 
+On Unix, every rooted open (read-only or writable) requires the held root's own `fstat`
+metadata to identify a directory owned by the current effective user (`st_uid == geteuid()`)
+with neither group nor other write permission (`(st_mode & (S_IWGRP | S_IWOTH)) == 0`).
+`RootDirectory::open` throws `IOException` naming this rule before any child is opened,
+created or probed. Modes 0700 and 0755 are accepted. Ancestors above the root retain only
+the held-identity rules; they need not be private. Unrooted opens are unchanged, and
+Windows remains unsupported and fail-closed.
+Callers create the root themselves with mode 0700 and never rely on the umask.
+
 After open, replacement of any held ancestor above or at the root is detected by identity
 revalidation before an operation, which fails closed. Below the root, a child is one validated
 plain component: no separators, `.` or `..`, empty string or NUL. Links at any depth,
@@ -22,7 +31,7 @@ adoption. Invalid names are refused before filesystem calls.
 it does not expand home/search paths or reopen the ambient database path. Capabilities may
 outlive the caller's root wrapper. Handle I/O stays handle-based.
 
-The directory must be application-owned and inaccessible to other principals. Writable opens
+The directory must be application-owned and not writable by other principals. Writable opens
 use an **unpublished session directory**, supplied by the application; this API does not infer
 publication state from a pathname. Revalidation catches deterministic replacement; it is not
 an atomic compare-and-open against arbitrary same-principal external tools. Such tools

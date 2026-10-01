@@ -179,6 +179,10 @@ std::shared_ptr<RootDirectory> RootDirectory::open(const std::string& absoluteRo
         hold(openat(state.descriptors.back(), name.c_str(),
             O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC), name);
     }
+    const auto& heldRoot = state.identities.back();
+    if (heldRoot.st_uid != geteuid() || (heldRoot.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
+        throw IOException("Restricted root must be owned by the current user and not writable by group or others.");
+    }
     state.validateAncestors();
     return root;
 }

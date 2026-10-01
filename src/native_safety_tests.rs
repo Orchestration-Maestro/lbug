@@ -50,10 +50,12 @@ fn checked<T>(
 
 #[cfg(unix)]
 fn fixture() -> anyhow::Result<(tempfile::TempDir, std::path::PathBuf, std::path::PathBuf)> {
+    use std::os::unix::fs::PermissionsExt;
     let directory = tempfile::tempdir()?;
     let root = directory.path().join("parent/root");
     let sibling = directory.path().join("outside");
     std::fs::create_dir_all(&root)?;
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))?;
     std::fs::create_dir(&sibling)?;
     std::fs::write(sibling.join("sentinel"), b"outside sentinel")?;
     Ok((directory, root, sibling))
@@ -214,6 +216,57 @@ fn rooted_constructor_refuses_links_directories_and_invalid_names() -> anyhow::R
     let after = std::fs::metadata(&sentinel)?;
     assert_eq!((before.dev(), before.ino()), (after.dev(), after.ino()));
     assert_eq!(std::fs::read(&sentinel)?, b"outside sentinel");
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn rooted_constructor_refuses_group_writable_root_without_creating_files() -> anyhow::Result<()> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let (_directory, owned, sibling) = fixture()?;
+    let sentinel = owned.join("sentinel");
+    std::fs::write(&sentinel, b"private-root sentinel")?;
+    std::fs::set_permissions(&owned, std::fs::Permissions::from_mode(0o770))?;
+    let root_before = std::fs::metadata(&owned)?;
+    let before = std::fs::metadata(&sentinel)?;
+    let listing = || -> anyhow::Result<std::collections::BTreeSet<std::ffi::OsString>> {
+        Ok(std::fs::read_dir(&owned)?
+            .map(|entry| entry.map(|entry| entry.file_name()))
+            .collect::<std::io::Result<_>>()?)
+    };
+    let entries = listing()?;
+    for read_only in [false, true] {
+        let result = checked(&owned, &sibling, || {
+            let root = RootDirectory::open(&owned)?;
+            Database::new_rooted(
+                &root,
+                "db.lbdb",
+                SystemConfig::default()
+                    .buffer_pool_size(16 * 1024 * 1024)
+                    .max_db_size(64 * 1024 * 1024)
+                    .max_num_threads(1)
+                    .read_only(read_only),
+            )
+        });
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("group-writable root accepted"),
+        };
+        assert!(matches!(error, crate::Error::CxxException(_)));
+        assert!(error
+            .to_string()
+            .contains("owned by the current user and not writable by group or others"));
+        let root_after = std::fs::metadata(&owned)?;
+        let after = std::fs::metadata(&sentinel)?;
+        assert_eq!(
+            (root_before.dev(), root_before.ino()),
+            (root_after.dev(), root_after.ino())
+        );
+        assert_eq!((before.dev(), before.ino()), (after.dev(), after.ino()));
+        assert_eq!(std::fs::read(&sentinel)?, b"private-root sentinel");
+        assert_eq!(entries, listing()?);
+        assert!(!owned.join("db.lbdb").exists());
+    }
     Ok(())
 }
 
