@@ -30,10 +30,14 @@ inline std::string utf8(const fs::path& p) {
     auto s = p.u8string();
     return {reinterpret_cast<const char*>(s.data()), s.size()};
 }
+inline bool sawBadLength = false;
 inline std::vector<BYTE> tokenInfo(HANDLE token, TOKEN_INFORMATION_CLASS kind) {
     DWORD size = 0;
-    GetTokenInformation(token, kind, nullptr, 0, &size);
-    require(GetLastError() == ERROR_INSUFFICIENT_BUFFER && size, "SETUP token size");
+    const BOOL sized = GetTokenInformation(token, kind, nullptr, 0, &size);
+    const DWORD error = GetLastError();
+    if (error == ERROR_BAD_LENGTH) sawBadLength = true;
+    require(!sized && size != 0 && (error == ERROR_INSUFFICIENT_BUFFER || error == ERROR_BAD_LENGTH),
+        "SETUP token size kind=" + std::to_string(kind) + " bytes=" + std::to_string(size) + " error=" + std::to_string(error));
     std::vector<BYTE> bytes(size);
     require(GetTokenInformation(token, kind, bytes.data(), size, &size), "SETUP token query");
     return bytes;
@@ -57,6 +61,10 @@ inline std::string user(bool standard = false) {
             require(LookupPrivilegeNameA(nullptr, &p->Privileges[i].Luid, name, &length), "SETUP privilege");
             require(std::string(name) != "SeBackupPrivilege" && std::string(name) != "SeRestorePrivilege", "SETUP no bypass privilege");
         }
+        auto integrity = tokenInfo(raw, TokenIntegrityLevel);
+        BYTE medium[SECURITY_MAX_SID_SIZE]; DWORD mediumSize = sizeof(medium);
+        require(CreateWellKnownSid(WinMediumLabelSid, nullptr, medium, &mediumSize), "SETUP medium SID");
+        require(EqualSid(reinterpret_cast<TOKEN_MANDATORY_LABEL*>(integrity.data())->Label.Sid, medium), "SETUP medium integrity");
         std::cout << "PASS verified_non_admin_token (before fixture handles)\n";
     }
     auto info = tokenInfo(raw, TokenUser);

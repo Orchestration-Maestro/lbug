@@ -14,6 +14,7 @@
 #include <vector>
 #include <cstring>
 #include "root_directory_windows_security.h"
+#include "windows_test_support.h"
 #include "common/exception/io.h"
 using namespace lbug::common;
 namespace seam = lbug::common::windows_security_test;
@@ -43,44 +44,7 @@ Local sid(const std::string& text) {
     return Local(raw);
 }
 std::string tokenUser(bool verifyStandard = false) {
-    HANDLE raw = nullptr;
-    require(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw), "SETUP token");
-    Handle token(raw);
-    auto info = [&](TOKEN_INFORMATION_CLASS kind) {
-        DWORD size = 0;
-        const BOOL sized = GetTokenInformation(raw, kind, nullptr, 0, &size);
-        const DWORD error = GetLastError();
-        require(!sized && size != 0 && (error == ERROR_INSUFFICIENT_BUFFER || error == ERROR_BAD_LENGTH),
-            "SETUP token size kind=" + std::to_string(kind) + " bytes=" + std::to_string(size) + " error=" + std::to_string(error));
-        std::vector<BYTE> bytes(size);
-        require(GetTokenInformation(raw, kind, bytes.data(), size, &size), "SETUP token query");
-        return bytes;
-    };
-    if (verifyStandard) {
-        auto e = info(TokenElevation);
-        require(!reinterpret_cast<TOKEN_ELEVATION*>(e.data())->TokenIsElevated, "SETUP non-elevated token");
-        auto groups = info(TokenGroups);
-        auto g = reinterpret_cast<TOKEN_GROUPS*>(groups.data());
-        auto admin = sid("S-1-5-32-544");
-        for (DWORD i = 0; i < g->GroupCount; ++i) require(!EqualSid(g->Groups[i].Sid, admin.get()), "SETUP no admin membership");
-        auto privileges = info(TokenPrivileges);
-        auto p = reinterpret_cast<TOKEN_PRIVILEGES*>(privileges.data());
-        for (DWORD i = 0; i < p->PrivilegeCount; ++i) {
-            char name[256]; DWORD length = sizeof(name);
-            require(LookupPrivilegeNameA(nullptr, &p->Privileges[i].Luid, name, &length), "SETUP privilege name");
-            require(std::string(name) != "SeBackupPrivilege" && std::string(name) != "SeRestorePrivilege", "SETUP no bypass privilege");
-        }
-        auto integrity = info(TokenIntegrityLevel);
-        auto medium = sid("S-1-16-8192");
-        require(EqualSid(reinterpret_cast<TOKEN_MANDATORY_LABEL*>(integrity.data())->Label.Sid, medium.get()), "SETUP medium integrity");
-        std::cout << "PASS verified_non_admin_token (before fixture handles)\n";
-    }
-    auto user = info(TokenUser);
-    LPSTR text = nullptr;
-    require(ConvertSidToStringSidA(reinterpret_cast<TOKEN_USER*>(user.data())->User.Sid, &text), "SETUP user SID");
-    Local owned(text);
-    std::cout << "token user=" << text << '\n';
-    return text;
+    return windows_test::user(verifyStandard);
 }
 void refused(const std::function<void()>& action, const std::string& assertion, const std::string& rule = "") {
     bool rejection = false;
@@ -370,6 +334,9 @@ int main(int argc, char** argv) {
         const std::string filter = argc > 3 ? argv[3] : "";
         unsigned count = 0;
         for (const auto& test : std::vector<std::pair<std::string, std::function<void()>>>{
+            {"token_sizing_bad_length_is_handled", [&] {
+                require(windows_test::sawBadLength, "real ERROR_BAD_LENGTH token sizing path not reached");
+            }},
             {"private_root_and_child_are_accepted", [&] { private_root_and_child_are_accepted(argv[1]); }},
             {"foreign_owner_or_writable_acl_refuses", [&] { foreign_owner_or_writable_acl_refuses(argv[1]); }},
             {"unreadable_security_is_not_private", [&] { unreadable_security_is_not_private(argv[1]); }},
@@ -380,7 +347,7 @@ int main(int argc, char** argv) {
             try { test.second(); require(!fixtureCleanupFailed, "SETUP fixture cleanup"); std::cout << "PASS " << test.first << '\n'; }
             catch (const std::exception& e) { std::cerr << "FAIL " << test.first << ": " << e.what() << '\n'; return 1; }
         }
-        require(count == (filter.empty() ? 5 : 1), "mandatory test group count");
+        require(count == (filter.empty() ? 6 : 1), "mandatory test group count");
         std::cout << "PASS windows_security groups=" << count << '\n';
         return 0;
     } catch (const std::exception& e) { std::cerr << "SETUP FAILURE: " << e.what() << '\n'; return 2; }

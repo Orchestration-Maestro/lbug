@@ -196,7 +196,7 @@ jobs:
             $cases = @($suite.testcase | Where-Object name -eq $test)
             if ($cases.Count -ne 1 -or $cases[0].status -ne 'run' -or $cases[0].failure -or $cases[0].error) { throw "Missing successful CTest case $test" }
           }
-          foreach ($required in @('PASS shared_vectors cases=190', 'PASS windows_security groups=5')) {
+          foreach ($required in @('PASS shared_vectors cases=190', 'PASS windows_security groups=6')) {
             if (!(Select-String -Path (Join-Path $evidence 'restored-green-ctest.txt') -SimpleMatch $required -Quiet)) { throw "Missing restored security evidence: $required" }
           }
       - name: Keep SHA-bound probe, token, API and mutant evidence

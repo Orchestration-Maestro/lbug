@@ -226,6 +226,32 @@ int main(int argc, char** argv) {
             for (auto& [file, snapshot] : snapshots) snapshot.unchanged(file);
             fs::remove_all(fixture);
         });
+        test("private_root_policy_is_wired_into_acquisition_and_reads", [&] {
+            auto fixture = parent / "security";
+            fs::create_directory(fixture); makePrivate(fixture);
+            auto broad = [&](const fs::path& p) {
+                auto h = hold(CreateFileW(p.c_str(), WRITE_DAC, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr));
+                PSECURITY_DESCRIPTOR sd = nullptr;
+                auto sddl = "D:P(A;OICI;FA;;;" + user() + ")(A;OICI;FA;;;WD)";
+                require(ConvertStringSecurityDescriptorToSecurityDescriptorA(sddl.c_str(), SDDL_REVISION_1, &sd, nullptr), "SETUP unsafe DACL");
+                BOOL present, defaulted; PACL acl;
+                require(GetSecurityDescriptorDacl(sd, &present, &acl, &defaulted), "SETUP unsafe DACL decode");
+                auto error = SetSecurityInfo(h.get(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                    nullptr, nullptr, acl, nullptr);
+                LocalFree(sd); require(error == ERROR_SUCCESS, "SETUP unsafe DACL apply");
+            };
+            std::ofstream(fixture / "child") << "private";
+            {
+                auto root = RootDirectory::open(utf8(fixture));
+                broad(fixture / "child");
+                refuses([&] { root->openFile("child", 0); }, "unsafe child ACL accepted", "maestro-private-root/1");
+                refuses([&] { root->probeRegularFile("child"); }, "unsafe child metadata accepted", "maestro-private-root/1");
+            }
+            broad(fixture);
+            refuses([&] { RootDirectory::open(utf8(fixture)); }, "unsafe root ACL accepted", "maestro-private-root/1");
+            makePrivate(fixture); fs::remove_all(fixture);
+        });
         test("read_only_mutators_remain_closed", [&] {
             auto root = RootDirectory::open(utf8(path));
             LocalFileSystem local("db.lbdb", root);
