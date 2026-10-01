@@ -1,0 +1,152 @@
+name: Maestro Windows capability probe
+
+on:
+  pull_request:
+    branches: [build/patched-0.20.4, build/lbug-0.20.4-cmake-reuse]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  capability-probe:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: 3
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Activate the built-in Visual Studio DeveloperShell
+        shell: pwsh
+        run: |
+          $before = @{}
+          Get-ChildItem Env: | ForEach-Object { $before[$_.Name] = $_.Value }
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          $install = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          Import-Module (Join-Path $install 'Common7/Tools/Microsoft.VisualStudio.DevShell.dll')
+          Enter-VsDevShell -VsInstallPath $install -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
+          Get-ChildItem Env: | Where-Object { $before[$_.Name] -ne $_.Value } | ForEach-Object {
+            "$($_.Name)=$($_.Value)" >> $env:GITHUB_ENV
+          }
+      - name: Configure and build only the SDK probe (no engine)
+        shell: pwsh
+        run: |
+          cmake -S tests/native_safety -B target/windows-probe -DMAESTRO_WINDOWS_PROBE_ONLY=ON
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build target/windows-probe --config Release --parallel 3
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (Test-Path target/windows-probe/engine) { throw 'Probe unexpectedly configured the engine' }
+          New-Item -ItemType Directory -Force target/windows-evidence | Out-Null
+          git rev-parse HEAD | Set-Content target/windows-evidence/tested-sha.txt
+          Get-Content target/windows-probe/CMakeCache.txt | Select-String 'CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION|CMAKE_CXX_COMPILER|MAESTRO_WINDOWS_PROBE_ONLY' | Set-Content target/windows-evidence/sdk.txt
+          Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' | Select-Object ProductName, CurrentBuildNumber, UBR, DisplayVersion, BuildLabEx | ConvertTo-Json | Set-Content target/windows-evidence/os-build.json
+      - name: Provision a standard-user child on elevated runners
+        shell: pwsh
+        run: |
+          $root = "C:\Users\Public\MaestroE02a-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          "PROBE_ROOT=$root" >> $env:GITHUB_ENV
+          New-Item -ItemType Directory -Force $root | Out-Null
+          $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
+          $admin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+          "Runner elevated=$admin"
+          if ($admin) {
+            $name = 'e02a' + [guid]::NewGuid().ToString('N').Substring(0, 15)
+            $password = 'Aa1!' + [Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
+            Write-Output "::add-mask::$password"
+            "PROBE_USER=$name" >> $env:GITHUB_ENV
+            "PROBE_PASSWORD=$password" >> $env:GITHUB_ENV
+            $user = New-LocalUser -Name $name -Password (ConvertTo-SecureString $password -AsPlainText -Force)
+            "PROBE_SID=$($user.SID.Value)" >> $env:GITHUB_ENV
+            $users = Get-LocalGroup -SID 'S-1-5-32-545'
+            Add-LocalGroupMember -Group $users -Member $user
+            icacls $root /grant "*$($user.SID.Value):(OI)(CI)F" '*S-1-5-32-545:(OI)(CI)RX'
+            if ($LASTEXITCODE -ne 0) { throw 'Could not grant private probe scratch access' }
+          }
+      - name: Red-first controls, green probe, isolated mutants and restored green
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $source = 'tests/native_safety/windows_capability_probe.cpp'
+          $root = $env:PROBE_ROOT
+          $exe = Join-Path $root 'maestro_windows_capability_probe.exe'
+          $evidence = Join-Path $pwd 'target/windows-evidence'
+          $credential = $null
+          if ($env:PROBE_USER) {
+            $credential = [pscredential]::new("$env:COMPUTERNAME\$env:PROBE_USER", (ConvertTo-SecureString $env:PROBE_PASSWORD -AsPlainText -Force))
+          }
+          function Build-Probe {
+            cmake --build target/windows-probe --config Release --parallel 3
+            if ($LASTEXITCODE -ne 0) { throw 'Probe build failed' }
+            Copy-Item target/windows-probe/Release/maestro_windows_capability_probe.exe $exe -Force
+          }
+          function Run-Child($program, $arguments, $label) {
+            $stdout = Join-Path $root "$label.stdout.txt"
+            $stderr = Join-Path $root "$label.stderr.txt"
+            $parameters = @{
+              FilePath = $program; ArgumentList = $arguments; WorkingDirectory = $root
+              RedirectStandardOutput = $stdout; RedirectStandardError = $stderr
+              Wait = $true; PassThru = $true
+            }
+            if ($credential) { $parameters.Credential = $credential; $parameters.LoadUserProfile = $true }
+            $child = Start-Process @parameters
+            Get-Content $stdout, $stderr | Tee-Object (Join-Path $evidence "$label.txt") | Out-Host
+            "command=$program $arguments exit=$($child.ExitCode)" | Tee-Object (Join-Path $evidence "$label.exit.txt") | Out-Host
+            return $child.ExitCode
+          }
+          function Mutant($label, $old, $new, $test) {
+            try {
+              $text = Get-Content -Raw $source
+              if ([regex]::Matches($text, [regex]::Escape($old)).Count -ne 1) { throw "Mutation $label must match exactly once" }
+              [IO.File]::WriteAllText((Join-Path $pwd $source), $text.Replace($old, $new))
+              git diff -- $source | Set-Content (Join-Path $evidence "$label.diff")
+              Build-Probe
+              $output = Run-Child $exe @($root, $test) $label
+              $exitCode = $output[-1]
+              if ($exitCode -ne 1 -or !(Select-String -Path (Join-Path $evidence "$label.txt") -SimpleMatch "FAIL ${test}:" -Quiet)) {
+                throw "Mutation $label did not fail its named assertion"
+              }
+            } finally {
+              git checkout -- $source
+              if ($LASTEXITCODE -ne 0) { throw 'Mutation restore failed' }
+              Build-Probe
+            }
+          }
+          Build-Probe
+          Mutant 'red-first-skip-barrier' 'api.invoke(requested);' 'api.success = true; // skipped actual barrier' 'barrier_no_call_cannot_qualify'
+          Mutant 'red-first-ignore-failure' '&& api.success;' '; // ignored actual API failure' 'barrier_error_cannot_qualify'
+          $green = Run-Child $exe @($root) 'green'
+          if ($green[-1] -ne 0) { throw 'Unmutated capability probe failed' }
+          Mutant 'mutant-file-instead-of-directory' 'api.invoke(requested);' 'api.invoke(api.file);' 'barrier_file_handle_cannot_qualify'
+          Mutant 'mutant-unsupported-qualifies' 'return documentedGuarantee && observed;' 'return documentedGuarantee;' 'barrier_unsupported_cannot_qualify'
+          # CTest is also run as the verified standard user; never count an elevated run.
+          $ctest = (Get-Command ctest).Source
+          $testFile = 'add_test(maestro_windows_capability_probe "' + $exe.Replace('\', '/') + '" "' + $root.Replace('\', '/') + '")'
+          $testFile | Set-Content (Join-Path $root 'CTestTestfile.cmake')
+          $restored = Run-Child $ctest @('--test-dir', $root, '--verbose', '--output-on-failure', '--output-junit', (Join-Path $root 'results.xml')) 'restored-green-ctest'
+          Copy-Item (Join-Path $root 'results.xml') $evidence
+          if ($restored[-1] -ne 0) { throw 'Restored standard-user CTest failed' }
+          git diff --exit-code -- $source
+          if ($LASTEXITCODE -ne 0) { throw 'Probe source was not restored' }
+          if (!(Select-String -Path (Join-Path $evidence 'restored-green-ctest.txt') -SimpleMatch 'VERDICT=NO' -Quiet)) {
+            throw 'Missing explicit diagnostic verdict'
+          }
+      - name: Keep SHA-bound probe, token, API and mutant evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-capability-probe-${{ github.sha }}
+          path: target/windows-evidence
+          if-no-files-found: error
+      - name: Remove the temporary account and profile
+        if: always()
+        shell: pwsh
+        run: |
+          if ($env:PROBE_USER) {
+            $sid = $env:PROBE_SID
+            Remove-LocalUser -Name $env:PROBE_USER -ErrorAction Stop
+            Get-CimInstance Win32_UserProfile | Where-Object SID -eq $sid | Remove-CimInstance -ErrorAction Stop
+            if (Get-LocalUser -Name $env:PROBE_USER -ErrorAction SilentlyContinue) { throw 'Temporary account remains' }
+            if (Get-CimInstance Win32_UserProfile | Where-Object SID -eq $sid) { throw 'Temporary profile remains' }
+            "Temporary account and profile removed: $env:PROBE_USER"
+          }
+          if ($env:PROBE_ROOT -and (Test-Path $env:PROBE_ROOT)) { Remove-Item -Recurse -Force $env:PROBE_ROOT }
