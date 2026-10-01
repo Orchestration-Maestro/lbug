@@ -293,10 +293,19 @@ jobs:
           New-Item -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock' -Force | Out-Null
           Set-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock' -Name AllowDevelopmentWithoutDevLicense -Type DWord -Value 1
           $evidence = Join-Path $pwd 'target/windows-root-evidence'
+          # Credential children inherit the runner environment, not its accessible temp directory.
+          $env:TEMP = $root
+          $env:TMP = $root
           function Run-RootChild($program, $arguments, $label) {
             $stdout = Join-Path $root "$label.stdout.txt"
             $stderr = Join-Path $root "$label.stderr.txt"
-            $child = Start-Process -FilePath $program -ArgumentList $arguments -WorkingDirectory $root -Credential $credential -LoadUserProfile -Wait -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+            $parameters = @{
+              FilePath = $program; WorkingDirectory = $root; Credential = $credential
+              LoadUserProfile = $true; Wait = $true; PassThru = $true
+              RedirectStandardOutput = $stdout; RedirectStandardError = $stderr
+            }
+            if ($arguments.Count -gt 0) { $parameters.ArgumentList = $arguments }
+            $child = Start-Process @parameters
             Get-Content $stdout, $stderr | Tee-Object (Join-Path $evidence "$label.txt") | Out-Host
             "command=$program $arguments exit=$($child.ExitCode)" | Set-Content (Join-Path $evidence "$label.exit.txt")
             return $child.ExitCode
