@@ -1,7 +1,9 @@
 #include "common/file_system/root_directory.h"
 
 #include "common/exception/io.h"
+#ifndef _WIN32
 #include "storage/storage_utils.h"
+#endif
 #include <filesystem>
 #include <mutex>
 #include <unordered_map>
@@ -21,6 +23,7 @@
 
 namespace lbug::common {
 
+#ifndef _WIN32
 void RootDirectory::validateName(const std::string& name) {
     if (name.empty() || name == "." || name == ".." ||
         name.find_first_of("/\\") != std::string::npos || name.find('\0') != std::string::npos) {
@@ -28,21 +31,8 @@ void RootDirectory::validateName(const std::string& name) {
     }
 }
 
+#endif
 #ifdef _WIN32
-struct RootDirectory::State {};
-RootDirectory::RootDirectory() = default;
-RootDirectory::~RootDirectory() = default;
-std::shared_ptr<RootDirectory> RootDirectory::open(const std::string&) {
-    throw IOException("Restricted root capability is unsupported on Windows (E02).");
-}
-int RootDirectory::openFile(const std::string& name, int) {
-    validateName(name);
-    throw IOException("Restricted openFile is unsupported on Windows (E02).");
-}
-bool RootDirectory::probeRegularFile(const std::string& name) {
-    validateName(name);
-    throw IOException("Restricted regular-file probe is unsupported on Windows (E02).");
-}
 void RootDirectory::adoptFileIfExists(const std::string&) {
     throw IOException("Restricted adoption is unsupported on Windows (E02).");
 }

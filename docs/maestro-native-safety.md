@@ -1,4 +1,4 @@
-# Restricted projection filesystem: E01a / E01b / E01c / E02a
+# Restricted projection filesystem: E01a / E01b / E01c / E02a / E02b / E02c
 
 These are native safety slices, **not a qualified engine isolation boundary yet**.
 Maestro must not adopt restricted mode until every E01 slice and E02 have landed and the
@@ -18,7 +18,7 @@ with neither group nor other write permission (`(st_mode & (S_IWGRP | S_IWOTH)) 
 `RootDirectory::open` throws `IOException` naming this rule before any child is opened,
 created or probed. Modes 0700 and 0755 are accepted. Ancestors above the root retain only
 the held-identity rules; they need not be private. Unrooted opens are unchanged, and
-Windows remains unsupported and fail-closed.
+native Windows supports read-only rooted construction as described below.
 Callers create the root themselves with mode 0700 and never rely on the umask.
 
 After open, replacement of any held ancestor above or at the root is detected by identity
@@ -53,7 +53,35 @@ bypassing the ownership boundary are unsupported.
 | Copy/overwrite, createDir, glob, expandPath | Native E01a refusals retained, no ambient fallback; E01c refuses file queries before these primitives | COPY/import/export, extension install/load, file-scan binding |
 | Alternative VFS registration/dispatch | Native registration refused; E01c refuses file-scan sources before glob, existence checks or function dispatch | Only local rooted handles supported |
 | External query features | E01c typed structural bind-time refusals; contextual runtime/recovery helpers share the same table | Extension install/load/uninstall, COPY FROM/TO, import/export, ATTACH/DETACH, CSV/NPY/Parquet scans and external Parquet storage |
-| Windows capability / restricted construction | Unsupported, fails closed before database I/O | E02 |
+| Windows capability / restricted construction | Private local NTFS roots held by non-delete-shared ancestor handles; metadata and read-only handles opened relative to the held root; writable construction refuses before database I/O | E02c; writable support remains closed |
+
+### Native Windows read-only boundary (E02c)
+
+Windows resolves the caller's existing absolute root once, with strict UTF-8 conversion,
+then walks the normalized volume-GUID path with held, non-inheritable directory handles.
+Every held ancestor excludes `FILE_SHARE_DELETE`. Before and after child access, those
+handles and directory-relative reopenings must retain their volume serial and 128-bit file
+IDs. Only fixed local NTFS volumes with the required SDK metadata semantics are supported.
+Trusted initial junctions, Unicode names and long roots are accepted; missing roots are never created.
+
+Acquisition and every rooted child access validate `maestro-private-root/1` through held
+handles. `NtCreateFile(FILE_OPEN)` opens one counted UTF-16 child relative to its held parent,
+with `FILE_OPEN_REPARSE_POINT`; kind, reparse attributes, delete-pending state, single link,
+normalized long spelling, volume and observed identity are checked before content access.
+ADS, invalid UTF-8, DOS devices, separators, controls, wildcards, trailing dot/space and
+case/short-name aliases refuse. Only an unremembered object-name-not-found is absence.
+
+`new_rooted` supports clean read-only databases and active-WAL read replay, without adoption,
+spill creation, mutation or namespace barriers. Windows writable rooted constructors refuse
+before startup probing; low-level writes, truncation, adoption, rename, removal, generated
+temps and directory/file sync remain closed. No directory-sync no-op is used. Unix behavior
+is unchanged. Read/seek/size errors propagate rather than returning fabricated success.
+This remains an intermediate fork slice, not deployment or engine-isolation qualification.
+
+The focused Windows workflow runs mandatory root and Rust reader cases as a verified
+standard user. The full native workflow runs the remaining native/Rust cases; it excludes
+only that separately executed standard-user CTest case. E02c hand mutants live exclusively
+on a disposable `test/` branch, never in the delivered production history.
 
 ### Companion ownership and publication
 

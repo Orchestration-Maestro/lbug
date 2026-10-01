@@ -9,7 +9,8 @@ add_library(lbug_file_system
         gzip_file_system.cpp)
 
 if(WIN32)
-    target_sources(lbug_file_system PRIVATE root_directory_windows_security.cpp)
+    target_sources(lbug_file_system PRIVATE root_directory_windows.cpp root_directory_windows_security.cpp)
+    target_compile_definitions(lbug_file_system PRIVATE _WIN32_WINNT=0x0A00 WINVER=0x0A00)
 endif()
 
 target_link_libraries(lbug_file_system Glob)

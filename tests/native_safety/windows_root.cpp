@@ -153,7 +153,7 @@ int main(int argc, char** argv) {
             makePrivate(extended);
             std::ofstream(extended / L"normal-\u03bb") << "unicode";
             {
-            auto cap = RootDirectory::open(utf8(extended));
+            auto cap = RootDirectory::open(utf8(unicode));
             LocalFileSystem local("db.lbdb", cap);
             auto f = local.openFile("normal-\xce\xbb", FileOpenFlags(FileFlags::READ_ONLY));
             char value[8]{};
@@ -173,6 +173,12 @@ int main(int argc, char** argv) {
             auto fixtures = parent / "kinds";
             fs::create_directory(fixtures); makePrivate(fixtures);
             std::ofstream(fixtures / "normal") << "normal";
+            std::ofstream(fixtures / "long-normal-filename.data") << "alias";
+            wchar_t shortPath[32768];
+            auto shortLength = GetShortPathNameW((fixtures / "long-normal-filename.data").c_str(), shortPath, 32768);
+            require(shortLength && shortLength < 32768, "SETUP mandatory short alias path");
+            auto shortLeaf = fs::path(std::wstring(shortPath, shortLength)).filename().wstring();
+            require(shortLeaf != L"long-normal-filename.data", "SETUP mandatory 8.3 alias missing");
             fs::create_directory(fixtures / "directory");
             require(CreateHardLinkW((fixtures / "hardlink").c_str(), outside.c_str(), nullptr), "SETUP mandatory hardlink");
             require(CreateSymbolicLinkW((fixtures / "filelink").c_str(), outside.c_str(), SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE), "SETUP mandatory file symlink");
@@ -186,6 +192,8 @@ int main(int argc, char** argv) {
                     }
                     refuses([&] { local.fileOrPathExists(name); }, "unsafe metadata accepted");
                 }
+                refuses([&] { local.fileOrPathExists(utf8(fs::path(shortLeaf))); }, "8.3 alias metadata accepted", "aliases");
+                refuses([&] { local.openFile(utf8(fs::path(shortLeaf)), FileOpenFlags(FileFlags::READ_ONLY)); }, "8.3 alias read accepted", "aliases");
                 require(!local.fileOrPathExists("missing"), "unobserved missing file is not absent");
                 for (auto flags : std::vector<int>{FileFlags::WRITE, FileFlags::READ_ONLY | FileFlags::WRITE,
                         FileFlags::WRITE | FileFlags::CREATE_IF_NOT_EXISTS,

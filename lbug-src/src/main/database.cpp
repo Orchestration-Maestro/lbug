@@ -16,6 +16,7 @@
 #endif
 
 #include "common/exception/exception.h"
+#include "common/exception/io.h"
 #include "common/file_system/virtual_file_system.h"
 #include "common/file_system/root_directory.h"
 #include "main/db_config.h"
@@ -102,6 +103,11 @@ Database::Database(std::shared_ptr<RootDirectory> root, std::string_view name,
     if (!rootDirectory || DBConfig::isDBPathInMemory(std::string(name))) {
         throw RuntimeException("Restricted database requires a root capability and disk child name.");
     }
+#ifdef _WIN32
+    if (!systemConfig.readOnly) {
+        throw IOException("Restricted writable database construction is unsupported on Windows (read-only only).");
+    }
+#endif
     initMembers(name, initBufferManager);
 }
 

@@ -14,7 +14,9 @@
 #include <tuple>
 #include <type_traits>
 #include <utility>
-#ifndef _WIN32
+#ifdef _WIN32
+#include "windows_test_support.h"
+#else
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -78,9 +80,30 @@ int main() {
         catch (const std::exception& e) { ++failures; std::cerr << "FAIL " << name << ": " << e.what() << '\n'; }
     };
 #ifdef _WIN32
-    test("windows fails closed", [] {
-        refused([] { RootDirectory::open(fs::temp_directory_path().string()); }, "unsupported");
+    auto parent = fs::temp_directory_path() / ("maestro-windows-native-" + std::to_string(GetCurrentProcessId()));
+    auto path = parent / "root";
+    fs::create_directories(path);
+    windows_test::makePrivate(path);
+    std::ofstream(parent / "outside") << "outside sentinel";
+    windows_test::Snapshot sentinel(parent / "outside");
+    auto config = lbug::main::SystemConfig(16 * 1024 * 1024, 1);
+    config.maxDBSize = 64 * 1024 * 1024;
+    config.forceCheckpointOnClose = false;
+    { lbug::main::Database fixture(windows_test::utf8(path / "db.lbdb"), config); }
+    test("windows read-only rooted construction succeeds", [&] {
+        auto root = RootDirectory::open(windows_test::utf8(path));
+        auto readOnly = config; readOnly.readOnly = true;
+        { lbug::main::Database db(root, "db.lbdb", readOnly); }
+        sentinel.unchanged(parent / "outside");
     });
+    test("windows writable construction refuses before I/O", [&] {
+        auto root = RootDirectory::open(windows_test::utf8(path));
+        auto listing = windows_test::entries(path);
+        refused([&] { lbug::main::Database db(root, "missing.lbdb", config); }, "writable database construction");
+        require(!fs::exists(path / "missing.lbdb") && listing == windows_test::entries(path), "writable constructor performed I/O");
+        sentinel.unchanged(parent / "outside");
+    });
+    fs::remove_all(parent);
 #else
     auto dir = fs::temp_directory_path() / ("maestro-native-" + std::to_string(getpid()));
     fs::remove_all(dir);
