@@ -2,6 +2,20 @@ use super::{env, fs, Fixture};
 use std::os::unix::fs::PermissionsExt;
 
 #[test]
+fn symlinked_cache_root_is_refused() {
+    use std::os::unix::fs::symlink;
+    let fixture = Fixture::new();
+    let destination = fixture.temp.path().join("real-cache");
+    fs::create_dir(&destination).unwrap();
+    fs::set_permissions(&destination, fs::Permissions::from_mode(0o700)).unwrap();
+    symlink(&destination, &fixture.cache).unwrap();
+    assert!(
+        crate::native_cache::NativeCache::from_env(&fixture.root).is_err(),
+        "symlinked root was followed"
+    );
+}
+
+#[test]
 fn replaced_trusted_root_is_refused() {
     let fixture = Fixture::new();
     fixture.build("target-a");

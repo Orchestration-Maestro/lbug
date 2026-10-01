@@ -163,7 +163,6 @@ fn external_cmake_cc_roots_bypass_without_access() {
         "CMAKE_LIBRARY_PATH",
         "CMAKE_FRAMEWORK_PATH",
         "CMAKE_PROGRAM_PATH",
-        "OpenSSL_ROOT",
         "WASI_SDK_PATH",
         "WASI_SYSROOT",
         "WASM_MUSL_SYSROOT",

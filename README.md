@@ -77,7 +77,9 @@ headers are synced and published atomically with a SHA-256 manifest. Per-target
 cxx bridges are not cached. Cache reads and publication use held, checked directory
 handles and no-follow opens; verified artifacts are copied into target-owned
 `OUT_DIR` before linking, so replacing a cache pathname cannot change link inputs.
-External CMake/toolchain/search roots and file-loading flags bypass the cache.
+Consumed external CMake/toolchain/search roots and file-loading flags bypass the
+cache. OpenSSL and pkg-config roots are inputs only with `extension_installer`
+enabled; the default-feature-free engine neither keys nor consumes those roots.
 Only recognized scalar flag families are keyed; unknown flags and path-bearing
 values also bypass. The environment declaration is in `build_support/build_env.rs`
 and the scalar flag table is in `build_support/cache_key.rs`. Unsupported atomic

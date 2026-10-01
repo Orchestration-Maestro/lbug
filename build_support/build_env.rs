@@ -1,6 +1,11 @@
 use std::{collections::BTreeSet, env::VarError, ffi::OsString};
 
 #[derive(Clone, Copy, PartialEq)]
+enum Feature {
+    ExtensionInstaller,
+}
+
+#[derive(Clone, Copy, PartialEq)]
 enum Kind {
     Watch,
     Native,
@@ -8,6 +13,7 @@ enum Kind {
     Compiler,
     Flags,
     TargetFile,
+    TargetFileWhen(Feature),
     Prefix,
 }
 
@@ -15,12 +21,21 @@ impl Kind {
     fn target_specific(self) -> bool {
         matches!(
             self,
-            Self::Target | Self::Compiler | Self::Flags | Self::TargetFile
+            Self::Target
+                | Self::Compiler
+                | Self::Flags
+                | Self::TargetFile
+                | Self::TargetFileWhen(_)
         )
     }
 
+    fn active(self) -> bool {
+        cfg!(feature = "extension_installer")
+            || self != Self::TargetFileWhen(Feature::ExtensionInstaller)
+    }
+
     fn file_input(self) -> bool {
-        matches!(self, Self::TargetFile)
+        matches!(self, Self::TargetFile | Self::TargetFileWhen(_)) && self.active()
     }
 }
 
@@ -104,11 +119,32 @@ const INPUTS: &[(&str, Kind, bool)] = &[
     ("C_INCLUDE_PATH", Kind::TargetFile, false),
     ("CPLUS_INCLUDE_PATH", Kind::TargetFile, false),
     ("LIBRARY_PATH", Kind::TargetFile, false),
-    ("OPENSSL_DIR", Kind::TargetFile, false),
-    ("OPENSSL_ROOT_DIR", Kind::TargetFile, false),
-    ("OpenSSL_ROOT", Kind::TargetFile, false),
-    ("PKG_CONFIG_PATH", Kind::TargetFile, false),
-    ("PKG_CONFIG_LIBDIR", Kind::TargetFile, false),
+    // Only the extension installer's FindOpenSSL/link_openssl consumes these.
+    (
+        "OPENSSL_DIR",
+        Kind::TargetFileWhen(Feature::ExtensionInstaller),
+        false,
+    ),
+    (
+        "OPENSSL_ROOT_DIR",
+        Kind::TargetFileWhen(Feature::ExtensionInstaller),
+        false,
+    ),
+    (
+        "OpenSSL_ROOT",
+        Kind::TargetFileWhen(Feature::ExtensionInstaller),
+        false,
+    ),
+    (
+        "PKG_CONFIG_PATH",
+        Kind::TargetFileWhen(Feature::ExtensionInstaller),
+        false,
+    ),
+    (
+        "PKG_CONFIG_LIBDIR",
+        Kind::TargetFileWhen(Feature::ExtensionInstaller),
+        false,
+    ),
     ("WASI_SDK_PATH", Kind::TargetFile, false),
     ("WASI_SYSROOT", Kind::TargetFile, false),
     ("WASM_MUSL_SYSROOT", Kind::TargetFile, false),
@@ -197,7 +233,7 @@ pub(crate) fn watch() {
 }
 
 pub(crate) fn native_names() -> Vec<String> {
-    names(|kind| kind != Kind::Watch)
+    names(|kind| kind != Kind::Watch && kind.active())
 }
 
 pub(crate) fn bypass_names() -> Vec<String> {

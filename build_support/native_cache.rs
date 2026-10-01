@@ -100,7 +100,7 @@ impl NativeCache {
         let mut actual = Vec::new();
         copy_checked(&entry, destination, Path::new(""), &mut actual)?;
         actual.sort();
-        if actual.is_empty() || actual.iter().map(String::as_str).ne(lines) {
+        if actual.is_empty() || actual.iter().map(|(_, line)| line.as_str()).ne(lines) {
             return Err(io::Error::other(
                 "native cache artifact digest/inventory mismatch",
             ));
@@ -234,7 +234,7 @@ fn copy_checked(
     dir: &Directory,
     destination: &Path,
     relative: &Path,
-    inventory: &mut Vec<String>,
+    inventory: &mut Vec<(PathBuf, String)>,
 ) -> io::Result<()> {
     fs::create_dir_all(destination)?;
     for name in dir.names()? {
@@ -254,11 +254,12 @@ fn copy_checked(
                 .create_new(true)
                 .open(&target)?;
             io::copy(&mut file, &mut output)?;
-            inventory.push(format!(
+            let line = format!(
                 "{}  {}",
                 cache_key::digest_file(&target)?,
                 path.to_string_lossy().replace('\\', "/")
-            ));
+            );
+            inventory.push((path, line));
         }
     }
     Ok(())

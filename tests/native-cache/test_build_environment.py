@@ -73,7 +73,7 @@ def main():
         # All project-owned environment reads must use the checked declaration
         # list; bypassing its wrapper would evade the emitted/read-set check.
         declarations = (repository / "build_support/build_env.rs").read_text()
-        declared = set(re.findall(r'\("([A-Z][A-Z0-9_]*)", Kind::', declarations))
+        declared = set(re.findall(r'\(\s*"([A-Za-z][A-Za-z0-9_]*)",\s*Kind::', declarations))
         for path in [repository / "build.rs", *sorted((repository / "build_support").glob("*.rs"))]:
             if path.name == "build_env.rs":
                 continue

@@ -228,43 +228,52 @@ jobs:
             "$($_.Name)=$($_.Value)" >> $env:GITHUB_ENV
           }
       - name: Prove locked prefetch precedes offline library-directory freshness checks
+        if: runner.os != 'Windows'
         shell: bash
         run: python tests/native-cache/test_ci_preparation.py --evidence "$RUNNER_TEMP/native-cache/build-environment"
+      - name: Prove locked prefetch precedes offline freshness checks on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: python tests/native-cache/test_ci_preparation.py --evidence "$env:RUNNER_TEMP/native-cache/build-environment"
       - name: Prove the standard runner environment never triggers an arbitrary-file bypass
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/native-cache"
           cargo test --locked --manifest-path tests/native-cache/Cargo.toml two_target_directories_reuse_complete_output -- --test-threads=1 --nocapture 2>&1 | tee "$RUNNER_TEMP/native-cache/normal-environment.log"
-          python - <<'PY'
-          import json
-          import os
-          import re
-          from pathlib import Path
-          evidence = Path(os.environ['RUNNER_TEMP']) / 'native-cache'
-          names = {'CFLAGS', 'CXXFLAGS', 'CPPFLAGS', 'ASMFLAGS', 'LDFLAGS', 'ARFLAGS', 'RANLIBFLAGS', 'CC_SHELL_ESCAPED_FLAGS'}
-          names.update(name for name in os.environ if re.match(r'(?:(?:HOST|TARGET)_)?(?:C|CXX|CPP|ASM|LD|AR|RANLIB)FLAGS(?:$|_)', name))
-          flags = {name: os.environ.get(name) for name in sorted(names)}
-          (evidence / 'normal-flag-inputs.json').write_text(json.dumps(flags, indent=2) + '\n')
-          print('Standard runner flag inputs: ' + json.dumps(flags))
-          text = (evidence / 'normal-environment.log').read_text()
-          assert 'native-cache environment:' in text, 'missing per-variable presence table'
-          assert 'native cache disabled by ' not in text, 'standard runner triggered an arbitrary-file bypass'
-          if os.environ['RUNNER_OS'] == 'Windows':
-              assert 'cache ownership cannot be verified on this platform; building from source' in text
-              assert 'native cache hit:' not in text and 'native cache published:' not in text
-          else:
-              assert 'native cache hit:' in text and 'native cache published:' in text
-          PY
+          python tests/native-cache/test_standard_environment.py --evidence "$RUNNER_TEMP/native-cache"
+      - name: Prove Windows standard environment builds from source without cache I/O
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $evidence = "$env:RUNNER_TEMP/native-cache"
+          New-Item -ItemType Directory -Force $evidence | Out-Null
+          cargo test --locked --manifest-path tests/native-cache/Cargo.toml two_target_directories_reuse_complete_output -- --test-threads=1 --nocapture 2>&1 | Tee-Object -FilePath "$evidence/normal-environment.log"
+          if ($LASTEXITCODE -ne 0) { throw 'Source-only fixture failed' }
+          python tests/native-cache/test_standard_environment.py --evidence $evidence
+          if ($LASTEXITCODE -ne 0) { throw 'Windows cache policy failed' }
       - name: Check engine/bridge/dependency compile accounting with a real compiler
         if: runner.os != 'Windows'
         run: python tests/native-cache/test_observer.py
       - name: Exercise the real build script with a counted miniature CMake engine
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/native-cache"
           cargo test --locked --manifest-path tests/native-cache/Cargo.toml -- --test-threads=1 --nocapture 2>&1 | tee "$RUNNER_TEMP/native-cache/fixture.log"
+      - name: Exercise the source-only miniature CMake engine on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $evidence = "$env:RUNNER_TEMP/native-cache"
+          cargo test --locked --manifest-path tests/native-cache/Cargo.toml -- --test-threads=1 --nocapture 2>&1 | Tee-Object -FilePath "$evidence/fixture.log"
+          if ($LASTEXITCODE -ne 0) { throw 'Source-only fixture failed' }
+      - name: Prove extension-only search roots bypass when consumed
+        if: runner.os != 'Windows'
+        shell: bash
+        run: cargo test --locked --manifest-path tests/native-cache/Cargo.toml --features extension_installer search_roots_are_inputs_only_for_extension_installer -- --test-threads=1
       - name: Measure full-engine cold/warm builds and unrelated changes
         if: runner.os != 'Windows'
         shell: bash

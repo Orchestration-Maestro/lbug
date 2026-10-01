@@ -9,6 +9,9 @@ mod guards;
 #[cfg(unix)]
 #[path = "cache_handles.rs"]
 mod handles;
+#[cfg(unix)]
+#[path = "cache_inventory.rs"]
+mod inventory;
 
 struct Fixture {
     temp: TempDir,
@@ -414,12 +417,7 @@ fn compiler_executable_content_invalidates_with_same_version() {
 #[test]
 fn external_file_search_roots_bypass_cache() {
     let fixture = Fixture::new();
-    for name in [
-        "CMAKE_PREFIX_PATH",
-        "CPATH",
-        "OPENSSL_ROOT_DIR",
-        "PKG_CONFIG_PATH",
-    ] {
+    for name in ["CMAKE_PREFIX_PATH", "CPATH"] {
         let saved = env::var_os(name);
         env::set_var(name, &fixture.root);
         let result = super::native_cache::NativeCache::from_env(&fixture.root).unwrap();
