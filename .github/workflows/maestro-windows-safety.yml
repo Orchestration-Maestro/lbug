@@ -269,7 +269,7 @@ jobs:
           Copy-Item target/native-safety/Release/maestro_windows_root.exe $exe
           $stdout = Join-Path $root 'root.stdout.txt'
           $stderr = Join-Path $root 'root.stderr.txt'
-          $child = Start-Process -FilePath $exe -ArgumentList @($root) -WorkingDirectory $root -Credential $credential -LoadUserProfile -Wait -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+          $child = Start-Process -FilePath $exe -ArgumentList @($root, 'rooted_read_only_roundtrip') -WorkingDirectory $root -Credential $credential -LoadUserProfile -Wait -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
           Get-Content $stdout, $stderr | Tee-Object target/windows-root-evidence/root.txt | Out-Host
           "exit=$($child.ExitCode)" | Set-Content target/windows-root-evidence/exit.txt
           git rev-parse HEAD | Set-Content target/windows-root-evidence/tested-sha.txt

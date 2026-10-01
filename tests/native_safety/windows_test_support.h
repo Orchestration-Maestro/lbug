@@ -1,4 +1,5 @@
 #pragma once
+#ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
@@ -106,3 +107,31 @@ struct Snapshot {
     }
 };
 }
+
+namespace windows_test {
+inline DWORD process(std::wstring command) {
+    STARTUPINFOW startup{}; startup.cb = sizeof(startup);
+    PROCESS_INFORMATION child{};
+    require(CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr,
+        &startup, &child), "SETUP second process");
+    auto thread = hold(child.hThread), handle = hold(child.hProcess);
+    require(WaitForSingleObject(handle.get(), 30000) == WAIT_OBJECT_0, "SETUP child timeout");
+    DWORD code;
+    require(GetExitCodeProcess(handle.get(), &code), "SETUP child exit");
+    return code;
+}
+inline void junction(const fs::path& link, const fs::path& target) {
+    wchar_t system[MAX_PATH];
+    require(GetSystemDirectoryW(system, MAX_PATH), "SETUP system directory");
+    require(process(L"\"" + std::wstring(system) + L"\\cmd.exe\" /d /c mklink /J \"" +
+        link.wstring() + L"\" \"" + target.wstring() + L"\"") == 0, "SETUP mandatory junction");
+}
+inline std::wstring executable() {
+    std::vector<wchar_t> name(32768);
+    auto length = GetModuleFileNameW(nullptr, name.data(), static_cast<DWORD>(name.size()));
+    require(length && length < name.size(), "SETUP executable path");
+    return {name.data(), length};
+}
+}
+
+#endif
