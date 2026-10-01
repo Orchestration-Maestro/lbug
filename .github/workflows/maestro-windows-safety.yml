@@ -16,6 +16,8 @@ jobs:
       CMAKE_BUILD_PARALLEL_LEVEL: 3
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - name: Activate the built-in Visual Studio DeveloperShell
         shell: pwsh
         run: |
@@ -31,50 +33,56 @@ jobs:
       - name: Configure and build only the SDK probe (no engine)
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force target/windows-evidence | Out-Null
+          $present = [bool](& git config --local --name-only --get-regexp '^http\..*\.extraheader$')
+          if ($LASTEXITCODE -gt 1) { throw 'Could not check checkout authentication headers' }
+          "extraheader_present=$present" | Tee-Object target/windows-evidence/checkout-credentials.txt
+          if ($present) { throw 'Checkout retained an authentication header' }
+          $passwordCheck = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes('$present = [bool]$env:PROBE_PASSWORD; "password_present=$present"; if ($present) { exit 1 }'))
+          & pwsh -NoProfile -EncodedCommand $passwordCheck | Tee-Object target/windows-evidence/initial-build-credentials.txt
+          if ($LASTEXITCODE -ne 0) { throw 'Initial build child inherited an account password' }
           cmake -S tests/native_safety -B target/windows-probe -DMAESTRO_WINDOWS_PROBE_ONLY=ON
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cmake --build target/windows-probe --config Release --parallel 3
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if (Test-Path target/windows-probe/engine) { throw 'Probe unexpectedly configured the engine' }
-          New-Item -ItemType Directory -Force target/windows-evidence | Out-Null
           git rev-parse HEAD | Set-Content target/windows-evidence/tested-sha.txt
           Get-Content target/windows-probe/CMakeCache.txt | Select-String 'CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION|CMAKE_CXX_COMPILER|MAESTRO_WINDOWS_PROBE_ONLY' | Set-Content target/windows-evidence/sdk.txt
           Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' | Select-Object ProductName, CurrentBuildNumber, UBR, DisplayVersion, BuildLabEx | ConvertTo-Json | Set-Content target/windows-evidence/os-build.json
-      - name: Provision a standard-user child on elevated runners
-        shell: pwsh
-        run: |
-          $root = "C:\Users\Public\MaestroE02a-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
-          "PROBE_ROOT=$root" >> $env:GITHUB_ENV
-          New-Item -ItemType Directory -Force $root | Out-Null
-          $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
-          $admin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-          "Runner elevated=$admin"
-          if ($admin) {
-            $name = 'e02a' + [guid]::NewGuid().ToString('N').Substring(0, 15)
-            $password = 'Aa1!' + [Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
-            Write-Output "::add-mask::$password"
-            "PROBE_USER=$name" >> $env:GITHUB_ENV
-            "PROBE_PASSWORD=$password" >> $env:GITHUB_ENV
-            $user = New-LocalUser -Name $name -Password (ConvertTo-SecureString $password -AsPlainText -Force)
-            "PROBE_SID=$($user.SID.Value)" >> $env:GITHUB_ENV
-            $users = Get-LocalGroup -SID 'S-1-5-32-545'
-            Add-LocalGroupMember -Group $users -Member $user
-            icacls $root /grant "*$($user.SID.Value):(OI)(CI)F" '*S-1-5-32-545:(OI)(CI)RX'
-            if ($LASTEXITCODE -ne 0) { throw 'Could not grant private probe scratch access' }
-          }
       - name: Red-first controls, green probe, isolated mutants and restored green
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $source = 'tests/native_safety/windows_capability_probe.cpp'
-          $root = $env:PROBE_ROOT
+          $root = "C:\Users\Public\MaestroE02a-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          "PROBE_ROOT=$root" >> $env:GITHUB_ENV
+          New-Item -ItemType Directory -Force $root | Out-Null
           $exe = Join-Path $root 'maestro_windows_capability_probe.exe'
           $evidence = Join-Path $pwd 'target/windows-evidence'
           $credential = $null
-          if ($env:PROBE_USER) {
-            $credential = [pscredential]::new("$env:COMPUTERNAME\$env:PROBE_USER", (ConvertTo-SecureString $env:PROBE_PASSWORD -AsPlainText -Force))
+          $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
+          $admin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+          "Runner elevated=$admin"
+          if ($admin) {
+            $name = 'e02a' + [guid]::NewGuid().ToString('N').Substring(0, 15)
+            # The password is step-local, never placed in a child process environment.
+            $password = [Security.SecureString]::new()
+            ('Aa1!' + [Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(32))).ToCharArray() | ForEach-Object { $password.AppendChar($_) }
+            $password.MakeReadOnly()
+            "PROBE_USER=$name" >> $env:GITHUB_ENV
+            $user = New-LocalUser -Name $name -Password $password
+            "PROBE_SID=$($user.SID.Value)" >> $env:GITHUB_ENV
+            $users = Get-LocalGroup -SID 'S-1-5-32-545'
+            Add-LocalGroupMember -Group $users -Member $user
+            icacls $root /grant "*$($user.SID.Value):(OI)(CI)F" '*S-1-5-32-545:(OI)(CI)RX'
+            if ($LASTEXITCODE -ne 0) { throw 'Could not grant private probe scratch access' }
+            $credential = [pscredential]::new("$env:COMPUTERNAME\$name", $password)
           }
+          $passwordCheck = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes('$present = [bool]$env:PROBE_PASSWORD; "password_present=$present"; if ($present) { exit 1 }'))
           function Build-Probe {
+            & pwsh -NoProfile -EncodedCommand $passwordCheck | Tee-Object (Join-Path $evidence 'build-child-credentials.txt') -Append | Out-Host
+            if ($LASTEXITCODE -ne 0) { throw 'Build child inherited an account password' }
             cmake --build target/windows-probe --config Release --parallel 3
             if ($LASTEXITCODE -ne 0) { throw 'Probe build failed' }
             Copy-Item target/windows-probe/Release/maestro_windows_capability_probe.exe $exe -Force
@@ -111,6 +119,10 @@ jobs:
               Build-Probe
             }
           }
+          $childCredentials = Run-Child (Get-Command pwsh).Source @('-NoProfile', '-EncodedCommand', $passwordCheck) 'standard-child-credentials'
+          if ($childCredentials[-1] -ne 0 -or !(Select-String -Path (Join-Path $evidence 'standard-child-credentials.txt') -SimpleMatch 'password_present=False' -Quiet)) {
+            throw 'Standard-user child inherited an account password or did not report absence'
+          }
           Build-Probe
           Mutant 'red-first-skip-barrier' 'api.invoke(requested);' 'api.success = true; // skipped actual barrier' 'barrier_no_call_cannot_qualify'
           Mutant 'red-first-ignore-failure' '&& api.success;' '; // ignored actual API failure' 'barrier_error_cannot_qualify'
@@ -118,13 +130,17 @@ jobs:
           if ($green[-1] -ne 0) { throw 'Unmutated capability probe failed' }
           Mutant 'mutant-file-instead-of-directory' 'api.invoke(requested);' 'api.invoke(api.file);' 'barrier_file_handle_cannot_qualify'
           Mutant 'mutant-unsupported-qualifies' 'return documentedGuarantee && observed;' 'return documentedGuarantee;' 'barrier_unsupported_cannot_qualify'
+          Mutant 'review-fake-nt-flush' 'status = ntFlush(handle, 0, nullptr, 0, &iosb);' 'status = 0; iosb.Status = 0; // fabricated NT flush' 'barrier_error_cannot_qualify'
           # CTest is also run as the verified standard user; never count an elevated run.
           $ctest = (Get-Command ctest).Source
           $testFile = 'add_test(maestro_windows_capability_probe "' + $exe.Replace('\', '/') + '" "' + $root.Replace('\', '/') + '")'
           $testFile | Set-Content (Join-Path $root 'CTestTestfile.cmake')
-          $restored = Run-Child $ctest @('--test-dir', $root, '--verbose', '--output-on-failure', '--output-junit', (Join-Path $root 'results.xml')) 'restored-green-ctest'
+          $restored = Run-Child $ctest @('--test-dir', $root, '--verbose', '--timeout', '120', '--output-on-failure', '--output-junit', (Join-Path $root 'results.xml')) 'restored-green-ctest'
           Copy-Item (Join-Path $root 'results.xml') $evidence
           if ($restored[-1] -ne 0) { throw 'Restored standard-user CTest failed' }
+          if (!(Select-String -Path (Join-Path $evidence 'restored-green-ctest.txt') -SimpleMatch 'Test timeout computed to be: 120' -Quiet)) {
+            throw 'Restored CTest did not use the 120-second timeout'
+          }
           git diff --exit-code -- $source
           if ($LASTEXITCODE -ne 0) { throw 'Probe source was not restored' }
           if (!(Select-String -Path (Join-Path $evidence 'restored-green-ctest.txt') -SimpleMatch 'VERDICT=NO' -Quiet)) {

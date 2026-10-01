@@ -269,7 +269,15 @@ void controls(Fixture& f, const std::string& filter) {
         Api ntDenied{true, f.ntFlush, f.leaf->value};
         const bool ntObserved = barrier(ntDenied, f.directory(), f.directory());
         result("read_only_directory_diagnostic", ntDenied, ntObserved);
-        require(!qualified(false, ntObserved), "read-only diagnostic cannot qualify");
+        if (f.ntFlush) {
+            require(ntDenied.calls == 1 && ntDenied.status < 0 && !ntDenied.success,
+                "barrier_error_cannot_qualify: actual NT directory failure");
+        } else {
+            require(ntDenied.calls == 0 && ntDenied.error == ERROR_PROC_NOT_FOUND,
+                "barrier_error_cannot_qualify: unsupported NT export");
+        }
+        require(!ntObserved && !qualified(true, ntObserved),
+            "barrier_error_cannot_qualify: NT directory failure qualified");
     });
     test("barrier_file_handle_cannot_qualify", [&] {
         Api api{false, f.ntFlush, f.leaf->value};
@@ -313,7 +321,7 @@ void rename(Fixture& f, HANDLE source, const std::wstring& destination, bool exp
         const BOOL ok = SetFileInformationByHandle(source, FileRenameInfo, info, static_cast<DWORD>(bytes.size()));
         const DWORD error = ok ? ERROR_SUCCESS : GetLastError();
         std::cout << "Win32_relative_rename_no_replace result=" << ok << " win32=" << error
-                  << " supported=0 (RootDirectory must be NULL per documentation)\n";
+                  << " supported=0 (error 87 observed on the tested build; no path fallback)\n";
         require(!ok && error == ERROR_INVALID_PARAMETER, "Win32 relative rename unsupported without fallback");
     }
 }
