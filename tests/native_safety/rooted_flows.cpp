@@ -13,6 +13,7 @@
 #include <poll.h>
 #include <signal.h>
 #include <sys/wait.h>
+#include "rooted_startup_tests.h"
 namespace lbug::common {
 extern void (*maestroBeforeRestrictedOpen)(int directory, const char* name);
 }
@@ -85,10 +86,6 @@ int recoveryDataOpens = 0;
 void countRecoveryDataOpens(int, const char* name) {
     if (std::string(name).ends_with(".lbdb")) { ++recoveryDataOpens; }
 }
-struct RecoveryOpenCounter {
-    RecoveryOpenCounter() { recoveryDataOpens = 0; maestroBeforeRestrictedOpen = countRecoveryDataOpens; }
-    ~RecoveryOpenCounter() { maestroBeforeRestrictedOpen = nullptr; }
-};
 void recoverCommittedRow(Fixture& f, const std::string& name) {
     auto root = RootDirectory::open(f.path.string());
     { RecoveryOpenCounter counter;
@@ -101,7 +98,7 @@ void recoverCommittedRow(Fixture& f, const std::string& name) {
       require(rows(conn) == 1, "recovery publication row"); }
     f.unchanged();
 }
-void crashCheckpoint(Fixture& f, const std::string& phase) {
+void crashCheckpoint(Fixture& f, const std::string& phase, bool recover = true) {
     int ready[2]; require(pipe(ready) == 0, "crash pipe");
     std::cout.flush();
     auto child = fork(); require(child >= 0, "fork");
@@ -140,7 +137,7 @@ void crashCheckpoint(Fixture& f, const std::string& phase) {
         std::cout << '\n';
     }
     f.unchanged();
-    recoverCommittedRow(f, "crash.lbdb");
+    if (recover) { recoverCommittedRow(f, "crash.lbdb"); }
 }
 struct FileSnapshot { std::string content; struct stat identity{}; };
 std::map<std::string, FileSnapshot> snapshots(const Fixture& f, Database& db) {
@@ -181,6 +178,7 @@ int main(int argc, char** argv) {
         catch (const std::exception& e) { ++failures; std::cerr << "FAIL " << name << ": " << e.what() << '\n'; }
     };
 #ifndef _WIN32
+    startupTests(test);
     test("checkpoint rollback repeated writes and cleanup", [] {
         Fixture f;
         {
@@ -253,12 +251,18 @@ int main(int argc, char** argv) {
             std::cout.flush();
             const auto child = fork(); require(child >= 0, "second writer fork");
             if (child == 0) {
+                startupAdopts = 0;
+                NativeHook hook(countStartupAdopts);
                 try {
                     Database second(RootDirectory::open(f.path.string()), "live.lbdb", c);
                     std::cerr << "second writer: unexpectedly opened database\n"; _exit(2);
                 }
                 catch (const std::exception& e) {
                     std::cerr << "second writer: " << e.what() << '\n';
+                    if (startupAdopts != 0) {
+                        std::cerr << "lock-refused writer adopted companions: " << startupAdopts << '\n';
+                        _exit(4);
+                    }
                     _exit(std::string(e.what()).find("Could not set lock") != std::string::npos ? 0 : 3);
                 }
             }
