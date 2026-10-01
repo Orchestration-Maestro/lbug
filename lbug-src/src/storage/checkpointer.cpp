@@ -66,6 +66,11 @@ void logCheckpointAndApplyShadowPagesForStorage(main::ClientContext& clientConte
         wal->logAndFlushCheckpoint(&clientContext);
     }
     shadowFile.applyShadowPages(storageManager, clientContext);
+    if (common::VirtualFileSystem::GetUnsafe(clientContext)->isRestricted()) {
+        // Keep the recoverable shadow until postCheckpointCleanup durably retires the
+        // checkpoint WAL, after every target's data-file sync has completed.
+        return;
+    }
     auto bufferManager = MemoryManager::Get(clientContext)->getBufferManager();
     if (!walRotated) {
         wal->clear();

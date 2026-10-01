@@ -6,6 +6,7 @@
 #include "common/serializer/deserializer.h"
 #include "common/serializer/serializer.h"
 #include "main/client_context.h"
+#include "main/database.h"
 #include "main/db_config.h"
 #include "storage/buffer_manager/buffer_manager.h"
 #include "storage/buffer_manager/memory_manager.h"
@@ -95,7 +96,11 @@ static uuid getOldDatabaseID(FileInfo& dataFileInfo) {
 }
 
 void ShadowFile::replayShadowPageRecords(ClientContext& context) {
-    replayShadowPageRecords(context, context.getDatabasePath());
+    if (VirtualFileSystem::GetUnsafe(context)->isRestricted()) {
+        replayShadowPageRecordsForStorageManager(context, *context.getDatabase()->getStorageManager());
+    } else {
+        replayShadowPageRecords(context, context.getDatabasePath());
+    }
 }
 
 void ShadowFile::replayShadowPageRecords(ClientContext& context, const std::string& databasePath) {
@@ -123,9 +128,8 @@ void ShadowFile::replayShadowPageRecords(ClientContext& context, const std::stri
 
 void ShadowFile::replayShadowPageRecordsForStorageManager(ClientContext& context,
     StorageManager& storageManager) {
-    // Variant for files whose handle is already open and locked by the given storage manager
-    // (partition children during recovery): avoids taking a second lock on the data file,
-    // which fails on platforms with per-handle locks (Windows).
+    // Reuse the startup lock (before FileHandle initialization) or an initialized partition
+    // handle. A second open/close would release POSIX record locks for this process.
     if (context.getDBConfig()->readOnly) {
         throw RuntimeException("Couldn't replay shadow pages under read-only mode. Please re-open "
                                "the database with read-write mode to replay shadow pages.");
@@ -133,7 +137,7 @@ void ShadowFile::replayShadowPageRecordsForStorageManager(ClientContext& context
     auto vfs = VirtualFileSystem::GetUnsafe(context);
     auto shadowFilePath = StorageUtils::getShadowFilePath(storageManager.getDatabasePath());
     auto shadowFileInfo = vfs->openFile(shadowFilePath, FileOpenFlags(FileFlags::READ_ONLY));
-    replayShadowPageRecordsCore(*shadowFileInfo, *storageManager.getDataFH()->getFileInfo());
+    replayShadowPageRecordsCore(*shadowFileInfo, *storageManager.getRecoveryDataFile());
 }
 
 void ShadowFile::replayShadowPageRecordsCore(FileInfo& shadowFileInfo, FileInfo& dataFileInfo) {

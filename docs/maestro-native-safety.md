@@ -34,12 +34,12 @@ bypassing the ownership boundary are unsupported.
 | --- | --- | --- |
 | Local `openFile` read/write/create/truncate | Unix held-dirfd `fstatat`/`openat`; regular single-link identity checked before content access; truncation delayed until validation and lock acquisition; newly created names directory-synced | `storage/file_handle.cpp`, shadow, WAL, checkpointer |
 | Startup and `fileOrPathExists` | Rooted no-follow regular-file probe; unsafe objects/errors are not absence; every later open rechecks | Database startup, WAL, checkpoint lock discovery; static legacy `fileExists` remains deferred to query refusals |
-| Native read/write locks | `fcntl` on the validated descriptor, with no path reopen; requested truncation occurs only after lock acquisition | File handles and checkpoint locks |
+| Native read/write locks | `fcntl` on the validated descriptor; rooted writable startup acquires and retains the database write lock before companion adoption or eager spill cleanup, then transfers that same descriptor into the data FileHandle after shadow replay | File handles and checkpoint locks; refused second writers preserve live bytes/dev/ino |
 | Root / remembered leaf replacement | Held ancestor identities and observed child identities revalidated; external disappearance/replacement refused | Supported rename/unlink explicitly transfer or revoke identity ownership |
 | Rename, including base `FileSystem` | Same held root/name pair in base, local and virtual FS; owned database/exact-companion source; atomic no-overwrite publication; replacement only of an already owned, identity-validated exact companion | WAL rotation; graph/partition rename remains refused by ownership |
 | `removeFileIfExists` | Exact owned companion or registered generated temp; anchored single-entry `unlinkat`, never recursive removal or extension-directory escape; missing exact companions are idempotent | WAL/shadow/checkpoint locks, spiller and bulk PK validation |
 | Spill and bulk-insert temp | Writable spill activation/reset under the held root; generated PK temps allocated create-new, registered by identity and unlinked through the same rooted removal | Forced-pressure spill/reload; operator's real no-index PK validator; see loader limitation below |
-| Checkpoint and writable WAL/shadow recovery | Enabled on Unix; writable startup explicitly adopts only validated exact companions; read-only startup does not adopt or create sidecars | Checkpoint/rollback, WAL replay, shadow application and close cleanup |
+| Checkpoint and writable WAL/shadow recovery | Enabled on Unix; adoption is under the startup write lock; recoverable shadows remain until every checkpoint target's data-file sync completes and the checkpoint WAL is durably removed; read-only startup never adopts or creates sidecars | Checkpoint/rollback, held-handle WAL/shadow replay and cleanup crash cuts |
 | File / directory durability | File I/O/sync uses validated descriptors; every supported name creation/rename/unlink syncs the held directory, revalidating ancestors before and after sync; WAL replay uses that handle, with no pathname reopen or ambient `.` fallback | Durability/identity errors throw, not success; directory-sync failure permanently poisons the capability |
 | Copy/overwrite, createDir, glob, expandPath | Still refused in restricted mode; no ambient fallback. These flows need no directory-creation primitive | Later E01 slices |
 | Alternative VFS registration/dispatch | Still refused; only local rooted handles supported | Later E01 dispatch slice |
@@ -60,8 +60,8 @@ created name is not a source permission. This keeps graph/partition child mutati
 
 A probe or an open of an existing file alone does not grant mutation ownership. A newly
 created rooted file is owned by that capability. Writable recovery explicitly adopts only the
-fixed companion names, after no-follow regular/single-link/remembered-identity checks and an
-owner match with the held root. Rename validates both endpoints immediately before the
+fixed companion names, under the database write lock and after no-follow
+regular/single-link/remembered-identity checks and an owner match with the held root. Rename validates both endpoints immediately before the
 anchored operation, then explicitly updates the identity and ownership maps. Replacement
 is allowed only for an exact companion already owned by that capability. Publication into
 any other existing destination refuses, even if that destination is owned.
@@ -83,6 +83,21 @@ I/O and again before returning success, so poison arriving during that sync is r
 Recovery requires a fresh capability, which must independently establish directory durability
 before its first durable file sync. State is not copied per file handle.
 
+### Rooted startup and checkpoint ordering
+
+Writable rooted startup opens and locks the database before adopting companions or constructing
+BufferManager (whose eager Spiller removes a stale `.tmp`). Shadow recovery uses that locked
+FileInfo; FileHandle initialization takes ownership only after replay, so its page count reflects
+the recovered file. Reinitialization retains that handle. A second writer's lock refusal occurs
+before adoption or deletion. Unrestricted startup retains upstream's adoption-free, buffer-manager-
+before-data-lock ordering; unrestricted shadow replay and partition ordering are unchanged.
+
+Rooted checkpoint application keeps the durable shadow intact while its committed WAL marker can
+require replay. After all target data-file syncs, `postCheckpointCleanup` removes and directory-syncs
+the checkpoint WAL before resetting/truncating/unlinking the shadow. Thus either side of the shadow
+unlink, including an unlink EIO, is recoverable with a fresh capability. Unrestricted checkpoint
+and partition-child cleanup retain upstream ordering.
+
 ### Generated bulk temp files
 
 The name helper lives in `StorageUtils`: `<db>.pk_validator.<counter>.tmp`. Only the engine's
@@ -100,8 +115,9 @@ the distinct, explicit writable-recovery adoption contract above.
 
 Run `bash scripts/audit-native-filesystem.sh` on the candidate revision. The diagnostic scan
 includes direct Unix rename-family/syscall calls; new hits require operation/caller review.
-The scan has **629 hits**, versus 616 at the E01a baseline. Both scans exit 0; the full
-candidate output and exact command are recorded in the E01b report. This scan does not qualify deferred
+The scan has **630 hits**, versus 629 at the E01b baseline and 616 at the E01a baseline.
+The new hit is the rooted startup database lock open; all scans exit 0. Full candidate output
+and the exact command are recorded in the E01b fix report. This scan does not qualify deferred
 rows.
 
 - WAL replay's former direct directory `open` moved behind `FileSystem::syncDirectoryForFile`.
@@ -132,7 +148,14 @@ Flow tests exercise forced-memory-pressure spill/reload/reset/close, actual bulk
 duplicate-run failure cleanup, rollback, repeated/automatic/default-close checkpoints,
 read-only WAL replay without writable adoption, and `SIGKILL`/fresh-capability reopen after
 WAL commit, WAL rename, checkpoint-record sync (before shadow application), and completed
-checkpoint. Read-only opens preserve entries and create no sidecars. The existing `CALL spill_to_disk`
+checkpoint, plus immediately before and after shadow unlink. The crash oracle blocks on a
+ready pipe (never SIGSTOP) before the parent kills the child; it records remaining WAL/shadow sizes
+without asserting a particular layout. Shadow-unlink EIO is followed by writable recovery,
+another checkpoint and read-only reopen. A refused second writer preserves a real live spill and
+all file snapshots; database bytes are read through the held handle because opening/closing another
+fd for that inode would release POSIX record locks. Tests also require a single data-file open
+through shadow recovery and retained FileHandle initialization. Read-only opens preserve entries
+and create no sidecars. The existing `CALL spill_to_disk`
 setter already refuses enabling spill for read-only databases. The native buffer-manager
 reset additionally retains the constructor's read-only mode: non-empty rooted read-only
 reset refuses before constructing a spiller, empty disable is allowed, and writable rooted
@@ -143,4 +166,7 @@ Only the native CMake harness compiles deterministic interleave/syscall-fault/cr
 ordinary bundled builds do not include them. Reused native archives leave callbacks inert
 unless the harness installs them. Rust constructor tests additionally exercise writable
 recovery, rollback, checkpoint and read-only reopen using the same source-built archive.
-The three-OS workflow runs the native and Rust suites; Windows still proves refusal.
+On Linux, `maestro_rooted_sidecars` uses `-Wl,--wrap=fsync` to observe the actual directory-sync
+call, verify its descriptor's dev/ino, return EIO there (the pre-call hook succeeds), and prove
+permanent refusal including an already-held WAL handle. The three-OS workflow runs the native
+and Rust suites; Windows still proves refusal.

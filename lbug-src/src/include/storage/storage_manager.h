@@ -37,7 +37,8 @@ class LBUG_API StorageManager {
 public:
     StorageManager(const std::string& databasePath, bool readOnly, bool enableChecksums,
         MemoryManager& memoryManager, bool enableCompression, bool enableDefaultHashIndex,
-        common::VirtualFileSystem* vfs);
+        common::VirtualFileSystem* vfs,
+        std::unique_ptr<common::FileInfo> recoveryDataFile = nullptr);
     ~StorageManager();
 
     Table* getTable(common::table_id_t tableID);
@@ -65,6 +66,10 @@ public:
     WAL& getWAL() const;
     ShadowFile& getShadowFile() const;
     FileHandle* getDataFH() const { return dataFH; }
+    // Shadow replay uses either the pending startup lock or the initialized data handle.
+    common::FileInfo* getRecoveryDataFile() const {
+        return recoveryDataFile ? recoveryDataFile.get() : dataFH->getFileInfo();
+    }
     std::string getDatabasePath() const { return databasePath; }
     // Phase-B per-partition files: retarget this manager (and its shadow file) after the
     // owning partition child is renamed. Caller must have closed the file handle.
@@ -127,6 +132,9 @@ private:
     std::unique_ptr<storage::DatabaseHeader> databaseHeader;
     bool readOnly;
     FileHandle* dataFH;
+    // Holds the startup write lock before BM construction; transferred after shadow replay
+    // so the FileHandle computes its page count from the recovered file, not the old header.
+    std::unique_ptr<common::FileInfo> recoveryDataFile;
     std::unordered_map<common::table_id_t, std::unique_ptr<Table>> tables;
     MemoryManager& memoryManager;
     std::unique_ptr<WAL> wal;

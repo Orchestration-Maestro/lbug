@@ -11,9 +11,10 @@ namespace lbug {
 namespace storage {
 
 FileHandle::FileHandle(const std::string& path, uint8_t fhFlags, BufferManager* bm,
-    uint32_t fileIndex, VirtualFileSystem* vfs, main::ClientContext* context)
-    : fhFlags{fhFlags}, fileIndex{fileIndex}, numPages{0}, pageCapacity{0}, bm{bm},
-      pageSizeClass{isNewTmpFile() && isLargePaged() ? TEMP_PAGE : REGULAR_PAGE}, pageStates{0, 0},
+    uint32_t fileIndex, VirtualFileSystem* vfs, main::ClientContext* context,
+    std::unique_ptr<FileInfo> lockedFileInfo)
+    : fhFlags{fhFlags}, fileInfo{std::move(lockedFileInfo)}, fileIndex{fileIndex}, numPages{0},
+      pageCapacity{0}, bm{bm}, pageSizeClass{isNewTmpFile() && isLargePaged() ? TEMP_PAGE : REGULAR_PAGE}, pageStates{0, 0},
       frameGroupIdxes{0, 0}, pageManager(std::make_unique<PageManager>(this)) {
     if (isNewTmpFile()) {
         constructTmpFileHandle(path);
@@ -40,7 +41,8 @@ void FileHandle::constructPersistentFileHandle(const std::string& path, VirtualF
             ((createFileIfNotExists()) ? FileFlags::CREATE_IF_NOT_EXISTS : 0x00000000);
         openFlags.lockType = isLockRequired() ? FileLockType::WRITE_LOCK : FileLockType::NO_LOCK;
     }
-    fileInfo = vfs->openFile(path, openFlags, context);
+    // Rooted startup transfers its already-locked descriptor after shadow recovery.
+    if (!fileInfo) { fileInfo = vfs->openFile(path, openFlags, context); }
     const auto fileLength = fileInfo->getFileSize();
     numPages = ceil(static_cast<double>(fileLength) / static_cast<double>(getPageSize()));
     pageCapacity = 0;

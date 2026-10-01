@@ -1,5 +1,31 @@
 #include "rooted_test_support.h"
 #include "common/exception/io.h"
+#ifdef __linux__
+extern "C" int __real_fsync(int);
+struct stat fsyncDirectory{};
+bool fsyncArmed = false;
+bool fsyncIdentityMatches = false;
+int actualDirectorySyncCalls = 0;
+extern "C" int __wrap_fsync(int fd) {
+    // Leave file syncs untouched; only the armed directory syscall returns EIO.
+    struct stat info{};
+    if (fsyncArmed && fstat(fd, &info) == 0 && S_ISDIR(info.st_mode)) {
+        ++actualDirectorySyncCalls;
+        fsyncIdentityMatches = info.st_dev == fsyncDirectory.st_dev &&
+            info.st_ino == fsyncDirectory.st_ino;
+        errno = EIO;
+        return -1;
+    }
+    return __real_fsync(fd);
+}
+struct FsyncFault {
+    explicit FsyncFault(const fs::path& directory) {
+        require(lstat(directory.c_str(), &fsyncDirectory) == 0, "fsync target stat");
+        actualDirectorySyncCalls = 0; fsyncIdentityMatches = false; fsyncArmed = true;
+    }
+    ~FsyncFault() { fsyncArmed = false; }
+};
+#endif
 #ifndef _WIN32
 Fixture* activeFixture = nullptr;
 int syncCount = 0;
@@ -318,6 +344,31 @@ int main(int argc, char** argv) {
             f.unchanged();
         });
     }
+#ifdef __linux__
+    test("directory sync reaches fsync and poisons on actual EIO", [] {
+        Fixture f; f.owned("db.lbdb.wal");
+        auto held = f.local->openFile("db.lbdb.wal", FileOpenFlags(FileFlags::READ_ONLY | FileFlags::WRITE));
+        activeFixture = &f; syncCount = 0; injectedError = 0;
+        bool typed = false;
+        {
+            FsyncFault fault(f.path); NativeHook hook(observe);
+            try { f.vfs->syncDirectoryForFile("db.lbdb"); }
+            catch (const IOException&) { typed = true; }
+        }
+        require(syncCount == 1, "pre-call hook did not return success exactly once");
+        require(actualDirectorySyncCalls == 1 && fsyncIdentityMatches,
+            "directory sync did not reach fsync on the held directory");
+        require(typed, "actual fsync EIO was ignored");
+        fileSyncCalls = 0; NativeHook hook(countFileSync);
+        refused([&] { f.vfs->syncDirectoryForFile("db.lbdb"); });
+        refused([&] { f.vfs->fileOrPathExists("db.lbdb.wal"); });
+        refused([&] { held->syncFile(); });
+        require(fileSyncCalls == 0 && actualDirectorySyncCalls == 1,
+            "poison retried a syscall after fault removal");
+        require(bytes(f.path / "db.lbdb.wal") == "owned", "actual EIO changed WAL bytes");
+        f.unchanged();
+    });
+#endif
     test("sync identity error permanently poisons held WAL handle", [] {
         Fixture f; f.owned("db.lbdb.wal");
         auto held = f.local->openFile("db.lbdb.wal", FileOpenFlags(FileFlags::READ_ONLY | FileFlags::WRITE));

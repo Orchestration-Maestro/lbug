@@ -129,7 +129,14 @@ void Database::initMembers(std::string_view dbPath, construct_bm_func_t initBmFu
         }
         vfs = std::make_unique<VirtualFileSystem>(databasePath);
     }
-    if (rootDirectory && !dbConfig->readOnly) { vfs->adoptCompanionFiles(); }
+    // Rooted startup must hold this lock before adoption or eager spill cleanup.
+    std::unique_ptr<FileInfo> recoveryDataFile;
+    if (rootDirectory && !dbConfig->readOnly) {
+        recoveryDataFile = vfs->openFile(databasePath,
+            FileOpenFlags(FileFlags::READ_ONLY | FileFlags::WRITE | FileFlags::CREATE_IF_NOT_EXISTS,
+                FileLockType::WRITE_LOCK), &clientContext);
+        vfs->adoptCompanionFiles();
+    }
     validatePathInReadOnly();
 
     bufferManager = initBmFunc(*this);
@@ -144,7 +151,7 @@ void Database::initMembers(std::string_view dbPath, construct_bm_func_t initBmFu
     catalog = std::make_unique<Catalog>();
     storageManager = std::make_unique<StorageManager>(databasePath, dbConfig->readOnly,
         dbConfig->enableChecksums, *memoryManager, dbConfig->enableCompression,
-        dbConfig->enableDefaultHashIndex, vfs.get());
+        dbConfig->enableDefaultHashIndex, vfs.get(), std::move(recoveryDataFile));
     transactionManager = std::make_unique<TransactionManager>(storageManager->getWAL());
     databaseManager = std::make_unique<DatabaseManager>();
 

@@ -7,7 +7,10 @@
 #include "processor/operator/persistent/node_batch_insert.h"
 #include "storage/buffer_manager/buffer_manager.h"
 #include "storage/table/chunked_node_group.h"
+#include "storage/storage_manager.h"
 #ifndef _WIN32
+#include <map>
+#include <poll.h>
 #include <signal.h>
 #include <sys/wait.h>
 namespace lbug::common {
@@ -46,18 +49,114 @@ void noSidecars(Fixture& f, const std::string& db) {
         require(!name.starts_with(db + "."), "sidecar leaked on checkpoint/close");
     }
 }
+int crashReady = -1;
+void awaitKill(char cut) {
+    require(write(crashReady, &cut, 1) == 1, "crash ready pipe");
+    for (;;) { pause(); }
+}
 void stopAfterRename(int, const char* name) {
     if (std::string(name).ends_with(".wal.checkpoint")) {
-        maestroBeforeRestrictedOpen = nullptr;
-        raise(SIGSTOP);
+        awaitKill('H');
     }
 }
 int stopAfterCheckpointRecord(const char* operation, int, const char* name, struct stat*) {
     if (std::string(operation) == "file-sync" && std::string(name).ends_with(".wal.checkpoint")) {
-        maestroRestrictedCall = nullptr;
-        raise(SIGSTOP);
+        awaitKill('H');
     }
     return 0;
+}
+bool shadowUnlinked = false;
+bool killBeforeShadowUnlink = false;
+int stopAtShadowUnlink(const char* operation, int directory, const char* name, struct stat*) {
+    if (std::string(operation) == "unlink" && name && std::string(name) == "crash.lbdb.shadow") {
+        if (killBeforeShadowUnlink) { awaitKill('H'); }
+        shadowUnlinked = true;
+    } else if (std::string(operation) == "directory-sync" && shadowUnlinked) {
+        require(fsync(directory) == 0, "sync shadow unlink before kill");
+        awaitKill('H');
+    }
+    return 0;
+}
+int failShadowUnlink(const char* operation, int, const char* name, struct stat*) {
+    return std::string(operation) == "unlink" && name &&
+        std::string(name) == "crash.lbdb.shadow" ? EIO : 0;
+}
+int recoveryDataOpens = 0;
+void countRecoveryDataOpens(int, const char* name) {
+    if (std::string(name).ends_with(".lbdb")) { ++recoveryDataOpens; }
+}
+struct RecoveryOpenCounter {
+    RecoveryOpenCounter() { recoveryDataOpens = 0; maestroBeforeRestrictedOpen = countRecoveryDataOpens; }
+    ~RecoveryOpenCounter() { maestroBeforeRestrictedOpen = nullptr; }
+};
+void recoverCommittedRow(Fixture& f, const std::string& name) {
+    auto root = RootDirectory::open(f.path.string());
+    { RecoveryOpenCounter counter;
+      Database db(root, name, config()); Connection conn(&db);
+      require(rows(conn) == 1, "crash lost committed row"); query(conn, "CHECKPOINT");
+      require(recoveryDataOpens == 1, "rooted recovery reopened the locked data file"); }
+    noSidecars(f, name);
+    auto c = config(); c.readOnly = true;
+    { Database db(RootDirectory::open(f.path.string()), name, c); Connection conn(&db);
+      require(rows(conn) == 1, "recovery publication row"); }
+    f.unchanged();
+}
+void crashCheckpoint(Fixture& f, const std::string& phase) {
+    int ready[2]; require(pipe(ready) == 0, "crash pipe");
+    std::cout.flush();
+    auto child = fork(); require(child >= 0, "fork");
+    if (child == 0) {
+        close(ready[0]); crashReady = ready[1];
+        try {
+            Database db(RootDirectory::open(f.path.string()), "crash.lbdb", config());
+            Connection conn(&db); prepare(conn);
+            if (phase == "rename") { maestroBeforeRestrictedOpen = stopAfterRename; }
+            if (phase == "checkpoint record") { maestroRestrictedCall = stopAfterCheckpointRecord; }
+            if (phase == "before shadow unlink" || phase == "after shadow unlink") {
+                killBeforeShadowUnlink = phase == "before shadow unlink";
+                shadowUnlinked = false; maestroRestrictedCall = stopAtShadowUnlink;
+            }
+            if (phase != "WAL commit") { query(conn, "CHECKPOINT"); }
+            awaitKill('D');
+        } catch (const std::exception& e) { std::cerr << e.what() << '\n'; _exit(1); }
+    }
+    close(ready[1]);
+    pollfd event{ready[0], POLLIN, 0};
+    const auto reached = poll(&event, 1, 30000);
+    char cut{};
+    const auto received = reached > 0 ? read(ready[0], &cut, 1) : 0;
+    close(ready[0]);
+    int status{};
+    const auto killed = kill(child, SIGKILL);
+    require(waitpid(child, &status, 0) == child, "wait for killed child");
+    require(received == 1, "child did not reach crash point");
+    require(cut == ((phase == "WAL commit" || phase == "checkpoint") ? 'D' : 'H'),
+        "checkpoint completed without reaching the requested cut");
+    require(killed == 0 && WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL, "SIGKILL");
+    for (auto suffix : {".wal.checkpoint", ".shadow"}) {
+        const auto path = f.path / (std::string("crash.lbdb") + suffix);
+        std::cout << "crash cut " << phase << ' ' << suffix << " bytes=";
+        if (fs::exists(path)) { std::cout << fs::file_size(path); } else { std::cout << "missing"; }
+        std::cout << '\n';
+    }
+    f.unchanged();
+    recoverCommittedRow(f, "crash.lbdb");
+}
+struct FileSnapshot { std::string content; struct stat identity{}; };
+std::map<std::string, FileSnapshot> snapshots(const Fixture& f, Database& db) {
+    std::map<std::string, FileSnapshot> result;
+    for (const auto& name : entries(f)) {
+        auto& snapshot = result[name];
+        if (name == db.getStorageManager()->getDatabasePath()) {
+            // Closing another fd for this inode releases A's POSIX record lock.
+            auto held = db.getStorageManager()->getDataFH()->getFileInfo();
+            snapshot.content.resize(held->getFileSize());
+            held->readFromFile(reinterpret_cast<uint8_t*>(snapshot.content.data()),
+                snapshot.content.size(), 0);
+        } else { snapshot.content = bytes(f.path / name); }
+        require(lstat((f.path / name).c_str(), &snapshot.identity) == 0, "snapshot stat");
+    }
+    return result;
 }
 std::unique_ptr<lbug::processor::NoIndexPKValidator> validator(ClientContext& context) {
     context.getClientConfigUnsafe()->pkValidatorSpillThreshold = 1;
@@ -114,30 +213,97 @@ int main(int argc, char** argv) {
     for (auto phase : {"WAL commit", "rename", "checkpoint record", "checkpoint"}) {
         test((std::string("SIGKILL reopen after ") + phase).c_str(), [=] {
             Fixture f;
-            auto child = fork(); require(child >= 0, "fork");
-            if (child == 0) {
-                try {
-                    auto root = RootDirectory::open(f.path.string());
-                    Database db(root, "crash.lbdb", config()); Connection conn(&db); prepare(conn);
-                    if (std::string(phase) == "rename") { maestroBeforeRestrictedOpen = stopAfterRename; }
-                    if (std::string(phase) == "checkpoint record") { maestroRestrictedCall = stopAfterCheckpointRecord; }
-                    if (std::string(phase) != "WAL commit") { query(conn, "CHECKPOINT"); }
-                    raise(SIGSTOP); _exit(2);
-                } catch (const std::exception& e) { std::cerr << e.what() << '\n'; _exit(1); }
-            }
-            int status{};
-            require(waitpid(child, &status, WUNTRACED) == child, "wait for crash point");
-            require(WIFSTOPPED(status), "child did not reach crash point");
-            require(kill(child, SIGKILL) == 0 && waitpid(child, &status, 0) == child && WIFSIGNALED(status), "SIGKILL");
-            auto root = RootDirectory::open(f.path.string());
-            { Database db(root, "crash.lbdb", config()); Connection conn(&db);
-              require(rows(conn) == 1, "crash lost committed row"); query(conn, "CHECKPOINT"); }
-            noSidecars(f, "crash.lbdb");
-            auto c = config(); c.readOnly = true;
-            { Database db(root, "crash.lbdb", c); Connection conn(&db); require(rows(conn) == 1, "recovery publication row"); }
-            f.unchanged();
+            crashCheckpoint(f, phase);
         });
     }
+    test("SIGKILL reopen before shadow unlink", [] {
+        Fixture f; crashCheckpoint(f, "before shadow unlink");
+    });
+    test("SIGKILL reopen after shadow unlink", [] {
+        Fixture f; crashCheckpoint(f, "after shadow unlink");
+    });
+    test("checkpoint shadow unlink EIO remains reopenable", [] {
+        Fixture f;
+        {
+            Database db(f.root, "crash.lbdb", config()); Connection conn(&db); prepare(conn);
+            { NativeHook hook(failShadowUnlink);
+              auto result = conn.query("CHECKPOINT");
+              require(!result->isSuccess(), "checkpoint ignored shadow unlink EIO"); }
+        }
+        f.unchanged(); recoverCommittedRow(f, "crash.lbdb");
+    });
+    test("second rooted writer preserves live spill on lock refusal", [] {
+        Fixture f; auto c = config(); c.bufferPoolSize = 2 * 1024 * 1024;
+        {
+            Database db(f.root, "live.lbdb", c); Connection conn(&db); prepare(conn);
+            auto& mm = *db.getMemoryManager();
+            std::vector<std::unique_ptr<InMemChunkedNodeGroup>> groups;
+            for (int i = 0; i < 16; ++i) {
+                std::vector<std::unique_ptr<ColumnChunkData>> chunks;
+                auto chunk = std::make_unique<ColumnChunkData>(mm, LogicalType::INT64(), 16384,
+                    false, ResidencyState::IN_MEMORY, false);
+                chunk->setValue<int64_t>(100 + i, 0); chunk->setValue<int64_t>(0, 16383);
+                chunks.push_back(std::move(chunk));
+                auto group = std::make_unique<InMemChunkedNodeGroup>(std::move(chunks), 0);
+                group->setUnused(mm); groups.push_back(std::move(group));
+            }
+            require(fs::exists(f.path / "live.lbdb.tmp") && fs::file_size(f.path / "live.lbdb.tmp") > 0,
+                "writer A never spilled");
+            auto before = snapshots(f, db);
+            std::cout.flush();
+            const auto child = fork(); require(child >= 0, "second writer fork");
+            if (child == 0) {
+                try {
+                    Database second(RootDirectory::open(f.path.string()), "live.lbdb", c);
+                    std::cerr << "second writer: unexpectedly opened database\n"; _exit(2);
+                }
+                catch (const std::exception& e) {
+                    std::cerr << "second writer: " << e.what() << '\n';
+                    _exit(std::string(e.what()).find("Could not set lock") != std::string::npos ? 0 : 3);
+                }
+            }
+            int status{}; require(waitpid(child, &status, 0) == child, "second writer wait");
+            f.unchanged();
+            std::cout << "second writer wait status=" << status << '\n';
+            auto after = snapshots(f, db);
+            require(before.size() == after.size(), "lock refusal changed live file names");
+            for (const auto& [name, snapshot] : before) {
+                auto current = after.find(name);
+                require(current != after.end(), "lock refusal removed live file");
+                require(current->second.content == snapshot.content &&
+                    current->second.identity.st_dev == snapshot.identity.st_dev &&
+                    current->second.identity.st_ino == snapshot.identity.st_ino,
+                    "lock refusal changed live bytes/dev/ino");
+            }
+            require(WIFEXITED(status) && WEXITSTATUS(status) == 0, "second writer did not refuse for lock contention");
+            for (int i = 0; i < 16; ++i) {
+                groups[i]->loadFromDisk(mm);
+                require(groups[i]->getColumnChunk(0).getValue<int64_t>(0) == 100 + i, "A spill reload bytes");
+                groups[i].reset();
+            }
+            auto bm = mm.getBufferManager(); bm->resetSpiller("");
+            require(!fs::exists(f.path / "live.lbdb.tmp"), "A spill reset left temp");
+            bm->resetSpiller(StorageUtils::getTmpFilePath("live.lbdb"));
+            require(rows(conn) == 1, "second writer lost committed row"); query(conn, "CHECKPOINT");
+        }
+        f.unchanged(); recoverCommittedRow(f, "live.lbdb");
+    });
+    test("rooted startup recovery keeps the locked data handle", [] {
+        Fixture f;
+        {
+            RecoveryOpenCounter counter;
+            Database db(f.root, "retained.lbdb", config()); Connection conn(&db); prepare(conn);
+            auto sm = db.getStorageManager();
+            auto held = sm->getDataFH();
+            ClientContext context(&db);
+            sm->initDataFileHandle(db.getVFS(), &context);
+            require(sm->getDataFH() == held, "rooted recovery reinitialized its locked data handle");
+            require(sm->getRecoveryDataFile() == held->getFileInfo(), "recovery lost its held data file");
+            require(recoveryDataOpens == 1, "rooted startup reopened its data file");
+            query(conn, "CHECKPOINT");
+        }
+        f.unchanged(); recoverCommittedRow(f, "retained.lbdb");
+    });
     test("spill forced memory pressure reset and close cleanup", [] {
         Fixture f;
         {
