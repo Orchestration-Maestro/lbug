@@ -335,6 +335,8 @@ if ((Get-Acl -LiteralPath $path).GetOwner([Security.Principal.SecurityIdentifier
 ";
     let status = std::process::Command::new("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        // Windows PowerShell 5.1 under pwsh inherits PowerShell 7's incompatible module path.
+        .env_remove("PSModulePath")
         .env("MAESTRO_TEST_PRIVATE_ROOT", directory.path())
         .status()?;
     anyhow::ensure!(status.success(), "Windows private-root fixture ACL failed");
@@ -362,6 +364,8 @@ if ($actual.GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlS
 ";
     let status = std::process::Command::new("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        // Windows PowerShell 5.1 under pwsh inherits PowerShell 7's incompatible module path.
+        .env_remove("PSModulePath")
         .env("MAESTRO_TEST_PRIVATE_FILE", path)
         .status()?;
     anyhow::ensure!(status.success(), "Windows reader owner fixture failed");
