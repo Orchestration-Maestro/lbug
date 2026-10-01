@@ -9,12 +9,13 @@ repository = "https://github.com/LadybugDB/ladybug-rust"
 license = "MIT"
 categories = ["database"]
 
-rust-version = "1.81"
+rust-version = "1.88"
 edition = "2021"
 
 # Only include files required to build to keep the crate size small
 include = [
     "build.rs",
+    "/build_support",
     "/src",
     "/include",
     # If more files are added to lbug-src, they should also be added to the rerun-if-changed
@@ -35,6 +36,10 @@ time = "0.3"
 uuid = "1.6"
 
 [build-dependencies]
+cc = "1"
+libc = "0.2"
+sha2 = { version = "0.11", default-features = false }
+tempfile = "3"
 cmake = "0.1"
 cxx-build = "^1.0.138" # should match the `cxx` version
 rustversion = "1"

@@ -1,4 +1,10 @@
-use std::env;
+#[path = "build_support/build_env.rs"]
+mod build_env;
+
+#[path = "build_support/native_cache.rs"]
+mod native_cache;
+
+use crate::build_env as env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -36,11 +42,9 @@ fn link_openssl() {
     {
         if output.status.success() {
             let lib_dir = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !lib_dir.is_empty() {
-                let path = PathBuf::from(&lib_dir);
-                if path.is_dir() {
-                    println!("cargo:rustc-link-search=native={}", path.display());
-                }
+            let path = PathBuf::from(&lib_dir);
+            if path.is_dir() {
+                println!("cargo:rustc-link-search=native={}", path.display());
             }
         }
     }
@@ -147,7 +151,7 @@ fn link_libraries(link_bundled_deps: bool) {
 }
 
 fn manifest_dir() -> PathBuf {
-    PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap())
+    PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap())
 }
 
 fn emit_lbug_metadata(source: &str, lib_dir: &Path) {
@@ -160,7 +164,7 @@ fn emit_lbug_metadata(source: &str, lib_dir: &Path) {
 
 fn get_lbug_root() -> PathBuf {
     let manifest_dir = manifest_dir();
-    if let Ok(lbug_source_dir) = std::env::var("LBUG_SOURCE_DIR") {
+    if let Ok(lbug_source_dir) = env::var("LBUG_SOURCE_DIR") {
         let root = PathBuf::from(lbug_source_dir);
         if root.is_symlink() || root.is_dir() {
             return root;
@@ -186,7 +190,7 @@ fn get_lbug_root() -> PathBuf {
     panic!("Bundled lbug-src is missing; provide LBUG_SOURCE_DIR for a local source checkout");
 }
 
-/// With `LBUG_REUSE_CMAKE_BUILD` set, the CMake build lives in one directory
+/// With `LBUG_REUSE_CMAKE_BUILD` set, the `CMake` build lives in one directory
 /// beside the build scripts' own, named after everything that shapes it, and a
 /// finished build there is reused as it is. Cargo gives this build script a new
 /// `OUT_DIR` whenever the features, flags or package selection around it change
@@ -194,7 +198,6 @@ fn get_lbug_root() -> PathBuf {
 /// is the same. Only for sources that never change in place (a registry or git
 /// checkout): an edited tree is not rebuilt.
 fn reused_cmake_dir(lbug_root: &Path) -> Option<PathBuf> {
-    println!("cargo:rerun-if-env-changed=LBUG_REUSE_CMAKE_BUILD");
     env::var_os("LBUG_REUSE_CMAKE_BUILD")?;
     // OUT_DIR is <profile>/build/lbug-<hash>/out.
     let out_dir = PathBuf::from(env::var_os("OUT_DIR")?);
@@ -206,18 +209,7 @@ fn reused_cmake_dir(lbug_root: &Path) -> Option<PathBuf> {
         link_mode(),
         cfg!(feature = "extension_installer")
     );
-    for var in [
-        "TARGET",
-        "HOST",
-        "PROFILE",
-        "OPT_LEVEL",
-        "DEBUG",
-        "CC",
-        "CXX",
-        "CFLAGS",
-        "CXXFLAGS",
-    ] {
-        println!("cargo:rerun-if-env-changed={var}");
+    for var in env::legacy_names() {
         shape.push('|');
         shape.push_str(&env::var(var).unwrap_or_default());
     }
@@ -247,8 +239,15 @@ fn remove_objects(dir: &Path) {
 }
 
 fn build_bundled_cmake() -> Vec<PathBuf> {
+    env::watch();
     let lbug_root = get_lbug_root();
-    let reused_dir = reused_cmake_dir(&lbug_root);
+    let cache = native_cache::NativeCache::from_env(&lbug_root)
+        .expect("Failed to prepare LBUG_NATIVE_CACHE_DIR");
+    let reused_dir = if env::var_os("LBUG_NATIVE_CACHE_DIR").is_some() {
+        None
+    } else {
+        reused_cmake_dir(&lbug_root)
+    };
     let finished = reused_dir
         .as_ref()
         .map(|dir| dir.join("lbug-build-finished"));
@@ -280,8 +279,7 @@ fn build_bundled_cmake() -> Vec<PathBuf> {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
+            .is_ok_and(|s| s.success())
         {
             build.generator("Ninja");
         }
@@ -289,12 +287,21 @@ fn build_bundled_cmake() -> Vec<PathBuf> {
         build.define("CMAKE_MSVC_RUNTIME_LIBRARY", "MultiThreadedDLL");
         build.define("CMAKE_POLICY_DEFAULT_CMP0091", "NEW");
     }
-    if let Ok(jobs) = std::env::var("NUM_JOBS") {
+    if let Ok(jobs) = env::var("NUM_JOBS") {
         std::env::set_var("CMAKE_BUILD_PARALLEL_LEVEL", jobs);
     }
-    let build_dir = match (&reused_dir, &finished) {
-        (Some(dir), Some(stamp)) if stamp.exists() => dir.clone(),
-        _ => build.build(),
+    let build_dir = if let Some(cache) = cache {
+        cache
+            .get_or_build(|private| {
+                build.out_dir(private);
+                build.build()
+            })
+            .expect("Failed to build/publish LBUG_NATIVE_CACHE_DIR")
+    } else {
+        match (&reused_dir, &finished) {
+            (Some(dir), Some(stamp)) if stamp.exists() => dir.clone(),
+            _ => build.build(),
+        }
     };
     if let (Some(dir), Some(stamp)) = (&reused_dir, &finished) {
         if !stamp.exists() {
@@ -339,8 +346,6 @@ fn build_ffi(
     }
     build.includes(include_paths);
 
-    println!("cargo:rerun-if-env-changed=LBUG_SHARED");
-
     println!("cargo:rerun-if-changed=include/lbug_rs.h");
     println!("cargo:rerun-if-changed=src/lbug_rs.cpp");
     println!("cargo:rerun-if-changed={bridge_file}");
@@ -369,6 +374,7 @@ fn build_ffi(
 }
 
 fn main() {
+    env::watch();
     if env::var("DOCS_RS").is_ok() {
         // Do nothing; we're just building docs and don't need the C++ library
         return;

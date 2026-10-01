@@ -11,12 +11,13 @@
 
 [package]
 edition = "2021"
-rust-version = "1.81"
+rust-version = "1.88"
 name = "lbug"
 version = "0.20.4"
 build = "build.rs"
 include = [
     "build.rs",
+    "/build_support",
     "/src",
     "/include",
     "/lbug-src/src",
@@ -89,6 +90,22 @@ version = "3"
 [dev-dependencies.time]
 version = "0.3"
 features = ["macros"]
+
+[build-dependencies.cc]
+version = "1"
+
+[build-dependencies.libc]
+version = "0.2"
+
+[build-dependencies.shlex]
+version = "2.0.1"
+
+[build-dependencies.sha2]
+version = "0.11"
+default-features = false
+
+[build-dependencies.tempfile]
+version = "3"
 
 [build-dependencies.cmake]
 version = "0.1"

@@ -1,0 +1,71 @@
+[package]
+name = "native-cache-fixture"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[features]
+extension_installer = []
+arrow = []
+
+[dependencies]
+cc = "1"
+shlex = "2.0.1"
+libc = "0.2"
+sha2 = { version = "0.11", default-features = false }
+tempfile = "3"
+cmake = "0.1"
+cxx-build = "^1.0.138"
+rustversion = "1"
+vcpkg = "0.2"
+
+[[bin]]
+name = "native-cache-fixture"
+path = "fixture.rs"
+
+[lints.clippy]
+inline_always = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+needless_pass_by_value = "allow"
+redundant_closure_for_method_calls = "allow"
+return_self_not_must_use = "allow"
+similar_names = "allow"
+struct_excessive_bools = "allow"
+too_many_arguments = "allow"
+too_many_lines = "allow"
+type_complexity = "allow"
+unreadable_literal = "allow"
+
+[lints.clippy.cargo]
+level = "warn"
+priority = -1
+
+[lints.clippy.complexity]
+level = "warn"
+priority = -1
+
+[lints.clippy.correctness]
+level = "warn"
+priority = -1
+
+[lints.clippy.pedantic]
+level = "warn"
+priority = -1
+
+[lints.clippy.perf]
+level = "warn"
+priority = -1
+
+[lints.clippy.style]
+level = "warn"
+priority = -1
+
+[lints.clippy.suspicious]
+level = "warn"
+priority = -1
+
