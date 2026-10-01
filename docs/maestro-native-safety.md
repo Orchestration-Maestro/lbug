@@ -1,4 +1,4 @@
-# Restricted projection filesystem: E01a / E01b
+# Restricted projection filesystem: E01a / E01b / E02a
 
 These are native safety slices, **not a qualified engine isolation boundary yet**.
 Maestro must not adopt restricted mode until every E01 slice and E02 have landed and the
@@ -134,6 +134,61 @@ rows.
   deployment. Static `LocalFileSystem::fileExists` remains unrestricted for the legacy binder.
 - Copy/overwrite, directory creation, query refusals, alternative-VFS dispatch, Windows safety
   and `build.rs` are unchanged by E01b.
+
+## E02a Windows namespace-barrier feasibility
+
+**Verdict: NO. Production rooted Windows remains fail-closed.** This diagnostic slice
+neither links the engine nor enables any rooted operation. An API returning success is
+not a documented parent-directory power-loss ordering guarantee.
+
+Configure `tests/native_safety` with `-DMAESTRO_WINDOWS_PROBE_ONLY=ON` to select only
+`maestro_windows_capability_probe`, before adding the engine. The focused
+`maestro-windows-safety.yml` workflow runs on PRs and manual dispatch. On an elevated
+runner it creates a temporary Users-only account, runs the probe in that account and
+removes the account/profile afterward. Before opening any tested handle, the child
+requires a non-elevated medium-integrity token, no Administrators SID (even deny-only),
+and no backup/restore privileges; it logs the user, groups and every privilege.
+
+On local NTFS the probe retains non-delete-shared ancestor handles and records volume
+serials and 128-bit file IDs. It separately observes `FlushFileBuffers` and dynamically
+resolved `NtFlushBuffersFileEx(handle, 0, nullptr, 0, &iosb)` on the same held directory,
+including create/file-flush, no-replace rename, and POSIX-disposition deletion with live
+leaf handles. Win32 `FileRenameInfo` with non-NULL `RootDirectory` is observed unsupported
+on the tested build (`ERROR_INVALID_PARAMETER`); the probe asserts unchanged
+source/destination snapshots without a path fallback. A separately authorized diagnostic resolves `NtSetInformationFile`
+and uses the SDK rename layout with the published `FileRenameInformation` class to test
+held-directory-relative collision refusal and publication. This is not a production API
+adoption. A denied writable-directory open is a negative capability result, not a
+passing writable fixture; read-only directory calls are explicitly diagnostic only.
+It records the SDK, compiler, exact OS build, source SHA, filesystem, access mask,
+Win32 errors, NTSTATUS and IO_STATUS_BLOCK. Mandatory mutation/token fixtures must
+execute or fail the workflow. Named red-first controls and five isolated hand-mutants
+prove that skipped calls, ignored failures, file-handle substitution, unsupported
+results and fabricated NT success cannot qualify. The final restored CTest runs in
+the same non-admin account.
+
+The documentation gate is unresolved, independently of runtime results:
+[FlushFileBuffers](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers)
+requires `GENERIC_WRITE` and documents administrative privileges for a volume-wide
+flush, not a non-admin parent-entry ordering guarantee.
+[NtFlushBuffersFileEx](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntflushbuffersfileex)
+documents flags-zero file data/metadata/storage-cache flushing and a kernel-driver
+calling context; it does not establish the required user-mode directory create/rename/
+delete power-loss ordering. [FILE_RENAME_INFO](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_rename_info)
+permits a directory handle in `RootDirectory` for a relative `FileName`; error 87 is
+an observed limitation on the tested build, not a documented prohibition. The
+diagnostic NT alternative follows the published
+[NtSetInformationFile](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntsetinformationfile)
+ABI and [rename layout](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_rename_information).
+Therefore even observed non-admin success cannot yield YES.
+No process-kill or hosted-runner test substitutes for those semantics. A future YES
+requires both applicable documented semantics and successful non-admin ordering probes;
+it would still need the remaining E02 production and qualification slices.
+
+SHA-bound observations, red/green transcripts, mutant diffs and restoration evidence
+are uploaded as `windows-capability-probe-<sha>`; the E02a ledger report binds these to
+the PR and native three-OS regression runs. No best-effort namespace barrier or weaker
+immutable-snapshot durability policy is adopted here.
 
 ## Tests
 

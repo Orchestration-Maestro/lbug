@@ -2,6 +2,27 @@ cmake_minimum_required(VERSION 3.15)
 project(MaestroNativeSafety LANGUAGES CXX C)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+option(MAESTRO_WINDOWS_PROBE_ONLY "Build only the standalone E02a Windows SDK probe" OFF)
+if(MAESTRO_WINDOWS_PROBE_ONLY)
+    if(NOT WIN32)
+        message(FATAL_ERROR "MAESTRO_WINDOWS_PROBE_ONLY requires the Windows SDK")
+    endif()
+    add_executable(maestro_windows_capability_probe windows_capability_probe.cpp)
+    execute_process(COMMAND git rev-parse HEAD WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        OUTPUT_VARIABLE MAESTRO_PROBE_SHA OUTPUT_STRIP_TRAILING_WHITESPACE RESULT_VARIABLE MAESTRO_SHA_RESULT)
+    if(NOT MAESTRO_SHA_RESULT EQUAL 0)
+        message(FATAL_ERROR "Cannot bind the probe to its source revision")
+    endif()
+    target_compile_definitions(maestro_windows_capability_probe PRIVATE
+        _WIN32_WINNT=0x0A00 WINVER=0x0A00
+        MAESTRO_WINDOWS_SDK="${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}"
+        MAESTRO_PROBE_SHA="${MAESTRO_PROBE_SHA}")
+    enable_testing()
+    add_test(NAME maestro_windows_capability_probe COMMAND maestro_windows_capability_probe
+        "${CMAKE_CURRENT_BINARY_DIR}")
+    set_tests_properties(maestro_windows_capability_probe PROPERTIES TIMEOUT 120)
+    return()
+endif()
 set(BUILD_SHELL OFF CACHE BOOL "" FORCE)
 set(BUILD_SINGLE_FILE_HEADER OFF CACHE BOOL "" FORCE)
 set(BUILD_SHARED_LBUG OFF CACHE BOOL "" FORCE)
