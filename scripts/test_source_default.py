@@ -8,7 +8,6 @@ All generated sources, native outputs and caches live outside the repository.
 import argparse
 import json
 import os
-from pathlib import Path
 import shutil
 import signal
 import socketserver
@@ -16,6 +15,7 @@ import subprocess
 import tempfile
 import threading
 import time
+from pathlib import Path
 from typing import cast
 
 
@@ -52,7 +52,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--evidence", type=Path, required=True)
     parser.add_argument("--repository", type=Path, help="Optional historical downloader control checkout")
+    parser.add_argument("--cargo-runner", type=Path, help="Optional command wrapping every Cargo invocation")
     args = parser.parse_args()
+    cargo = ([str(args.cargo_runner)] if args.cargo_runner else []) + ["cargo"]
     evidence = args.evidence.resolve()
     evidence.mkdir(parents=True, exist_ok=True)
     fixture_repository = Path(__file__).resolve().parents[1]
@@ -79,7 +81,7 @@ def main():
         env["CARGO_TARGET_DIR"] = str(root / "target")
         env["CCACHE_DIR"] = str(root / "ccache")
         env["SCCACHE_DIR"] = str(root / "sccache")
-        command = ["cargo", "fetch", "--locked", "--manifest-path", str(manifest)]
+        command = cargo + ["fetch", "--locked", "--manifest-path", str(manifest)]
         with (evidence / "prefetch.log").open("w", encoding="utf-8") as log:
             log.write("Command: " + repr(command) + "\n")
             log.flush()
@@ -94,7 +96,7 @@ def main():
                 env[name] = address
             env["NO_PROXY"] = env["no_proxy"] = ""
             env["CARGO_NET_OFFLINE"] = "true"
-            command = ["cargo", "run", "--offline", "--locked", "-vv", "--manifest-path", str(manifest)]
+            command = cargo + ["run", "--offline", "--locked", "-vv", "--manifest-path", str(manifest)]
             with (evidence / "build.log").open("w", encoding="utf-8") as log:
                 log.write("Command: " + repr(command) + "\n")
                 log.write("cwd outside repository; all LBUG_* and DOCS_RS unset; empty CARGO_HOME and target before prefetch\n")

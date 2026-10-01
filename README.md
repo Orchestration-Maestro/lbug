@@ -62,6 +62,36 @@ whenever the fingerprint of the crate changes: other features, other
 - `liblbug` links `-bundle`: a debug archive is 2.6 GB, and bundling copied
   it into every rlib of the crate, with about 7 GB of memory.
 
+## External native cache
+
+Set `LBUG_NATIVE_CACHE_DIR` to reuse complete engine builds across Cargo target
+directories. The directory is created privately when absent. On Unix it and
+its contents must be owned by the current user and not group/other writable;
+untrusted roots fail and incomplete, mismatched or untrusted entries rebuild
+privately without being overwritten. Windows deliberately builds from source
+because cache ownership cannot be verified with the existing dependencies.
+
+The SHA-256 key covers native source contents, target, compiler/toolchain
+identities, profile, flags and features. Successful engine libraries and generated
+headers are synced and published atomically with a SHA-256 manifest. Per-target
+cxx bridges are not cached. External CMake/toolchain/include-file inputs bypass
+the cache rather than guess their identity; the single input declaration and
+bypass classification live in `build_support/build_env.rs`. Unsupported atomic
+no-replace publication keeps a private complete output, never replaces an entry.
+
+Unset the variable for the original source-build behavior. The legacy
+`LBUG_REUSE_CMAKE_BUILD` is unchanged when the external cache is unset, but the
+external cache never relies on its weak finished stamp. No path downloads native
+libraries. The fork requires Rust 1.88, matching its existing locked dependencies.
+
+Run the counted miniature-engine cases and real-engine measurements:
+
+```sh
+cargo test --locked --manifest-path tests/native-cache/Cargo.toml -- --test-threads=1
+python tests/native-cache/test_build_environment.py --evidence /tmp/build-environment
+python scripts/test_native_cache.py --evidence /tmp/native-cache
+```
+
 ## Source-default builds
 
 The fork builds bundled C++ by default, including for external consumers.
