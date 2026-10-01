@@ -1,4 +1,4 @@
-name: Maestro Windows capability probe
+name: Maestro Windows capability and security
 
 on:
   pull_request:
@@ -131,10 +131,53 @@ jobs:
           Mutant 'mutant-file-instead-of-directory' 'api.invoke(requested);' 'api.invoke(api.file);' 'barrier_file_handle_cannot_qualify'
           Mutant 'mutant-unsupported-qualifies' 'return documentedGuarantee && observed;' 'return documentedGuarantee;' 'barrier_unsupported_cannot_qualify'
           Mutant 'review-fake-nt-flush' 'status = ntFlush(handle, 0, nullptr, 0, &iosb);' 'status = 0; iosb.Status = 0; // fabricated NT flush' 'barrier_error_cannot_qualify'
+          # E02b uses the same verified child and step-local credential, not an
+          # environment password. Only the test executable enables fault injection.
+          $securitySource = 'lbug-src/src/common/file_system/root_directory_windows_security.cpp'
+          $securityExe = Join-Path $root 'maestro_windows_security.exe'
+          $fixture = Join-Path $root 'windows-private-root-v1.tsv'
+          Copy-Item tests/native_safety/windows-private-root-v1.tsv $fixture
+          $fixtureHash = (Get-FileHash $fixture -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($fixtureHash -ne 'fc2cc9f0f21bf26df6f56beadb9e6e80f8712489b26545d74c13f93010a4b46d') { throw 'Private-root fixture hash changed' }
+          "contract=maestro-private-root/1 cases=190 sha256=$fixtureHash" | Set-Content (Join-Path $evidence 'security-fixture.txt')
+          function Build-Security {
+            & pwsh -NoProfile -EncodedCommand $passwordCheck | Tee-Object (Join-Path $evidence 'security-build-credentials.txt') -Append | Out-Host
+            if ($LASTEXITCODE -ne 0) { throw 'Security build child inherited an account password' }
+            cmake --build target/windows-probe --config Release --target maestro_windows_security --parallel 3
+            if ($LASTEXITCODE -ne 0) { throw 'Security build failed' }
+            Copy-Item target/windows-probe/Release/maestro_windows_security.exe $securityExe -Force
+          }
+          function Security-Mutant($label, $old, $new, $test, $assertion) {
+            try {
+              $text = Get-Content -Raw $securitySource
+              if ([regex]::Matches($text, [regex]::Escape($old)).Count -ne 1) { throw "Mutation $label must match exactly once" }
+              [IO.File]::WriteAllText((Join-Path $pwd $securitySource), $text.Replace($old, $new))
+              git diff -- $securitySource | Set-Content (Join-Path $evidence "$label.diff")
+              Build-Security
+              $output = Run-Child $securityExe @($root, $fixture, $test) $label
+              if ($output[-1] -ne 1 -or !(Select-String -Path (Join-Path $evidence "$label.txt") -SimpleMatch "FAIL ${test}: $assertion" -Quiet)) {
+                throw "Mutation $label did not fail its named assertion"
+              }
+            } finally {
+              git checkout -- $securitySource
+              if ($LASTEXITCODE -ne 0) { throw 'Security mutation restore failed' }
+              Build-Security
+            }
+          }
+          Build-Security
+          $securityGreen = Run-Child $securityExe @($root, $fixture) 'security-green'
+          if ($securityGreen[-1] -ne 0) { throw 'Private-root suite failed' }
+          Security-Mutant 'security-mutant-owner' 'if (!api.equalSid(objectOwner, user)) fail("current-user owner");' 'if (false) fail("current-user owner");' 'foreign_owner_or_writable_acl_refuses' 'foreign owner refused (synthetic, no privileged setup)'
+          Security-Mutant 'security-mutant-null-dacl' 'if (sd.Dacl == 0) fail("null DACL");' 'if (sd.Dacl == 0) return;' 'foreign_owner_or_writable_acl_refuses' 'null DACL refused'
+          Security-Mutant 'security-mutant-writable-ace' 'fail("untrusted mutating grant");' '; // ignored unsafe grant' 'foreign_owner_or_writable_acl_refuses' 'unsafe writable ACE refused'
+          Security-Mutant 'security-mutant-query-error' 'if (error != ERROR_SUCCESS) fail("security query failed");' 'if (error != ERROR_SUCCESS) return Local{};' 'unreadable_security_is_not_private' 'unreadable real child security refused'
+          git diff --exit-code -- $securitySource
+          if ($LASTEXITCODE -ne 0) { throw 'Security source was not restored' }
           # CTest is also run as the verified standard user; never count an elevated run.
           $ctest = (Get-Command ctest).Source
           $testFile = 'add_test(maestro_windows_capability_probe "' + $exe.Replace('\', '/') + '" "' + $root.Replace('\', '/') + '")'
           $testFile | Set-Content (Join-Path $root 'CTestTestfile.cmake')
+          ('add_test(maestro_windows_security "' + $securityExe.Replace('\', '/') + '" "' + $root.Replace('\', '/') + '" "' + $fixture.Replace('\', '/') + '")') | Add-Content (Join-Path $root 'CTestTestfile.cmake')
           $restored = Run-Child $ctest @('--test-dir', $root, '--verbose', '--timeout', '120', '--output-on-failure', '--output-junit', (Join-Path $root 'results.xml')) 'restored-green-ctest'
           Copy-Item (Join-Path $root 'results.xml') $evidence
           if ($restored[-1] -ne 0) { throw 'Restored standard-user CTest failed' }
@@ -145,6 +188,16 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Probe source was not restored' }
           if (!(Select-String -Path (Join-Path $evidence 'restored-green-ctest.txt') -SimpleMatch 'VERDICT=NO' -Quiet)) {
             throw 'Missing explicit diagnostic verdict'
+          }
+          [xml]$junit = Get-Content -Raw (Join-Path $root 'results.xml')
+          $suite = $junit.testsuite
+          if ($suite.tests -ne '2' -or $suite.failures -ne '0' -or $suite.disabled -ne '0' -or $suite.skipped -ne '0') { throw 'Restored CTest count/failure/skip mismatch' }
+          foreach ($test in @('maestro_windows_capability_probe', 'maestro_windows_security')) {
+            $cases = @($suite.testcase | Where-Object name -eq $test)
+            if ($cases.Count -ne 1 -or $cases[0].status -ne 'run' -or $cases[0].failure -or $cases[0].error) { throw "Missing successful CTest case $test" }
+          }
+          foreach ($required in @('PASS shared_vectors cases=190', 'PASS windows_security groups=5')) {
+            if (!(Select-String -Path (Join-Path $evidence 'restored-green-ctest.txt') -SimpleMatch $required -Quiet)) { throw "Missing restored security evidence: $required" }
           }
       - name: Keep SHA-bound probe, token, API and mutant evidence
         if: always()
