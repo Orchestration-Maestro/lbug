@@ -1,6 +1,7 @@
 #include "processor/operator/persistent/reader/parquet/parquet_reader.h"
 
 #include "binder/binder.h"
+#include "binder/rooted_query_refusal.h"
 #include "common/exception/binder.h"
 #include "common/exception/copy.h"
 #include "common/file_system/virtual_file_system.h"
@@ -26,6 +27,7 @@ using namespace lbug::common;
 ParquetReader::ParquetReader(std::string filePath, std::vector<bool> columnSkips,
     main::ClientContext* context)
     : filePath{std::move(filePath)}, columnSkips(std::move(columnSkips)), context{context} {
+    binder::refuseRootedQuery(*context, std::string_view{ParquetScanFunction::name});
     initMetadata();
 }
 
@@ -713,6 +715,7 @@ static row_idx_t getNumRows(std::vector<std::string> filePaths, uint64_t numColu
 
 static std::unique_ptr<TableFuncBindData> bindFunc(main::ClientContext* context,
     const TableFuncBindInput* input) {
+    binder::refuseRootedQuery(*context, std::string_view{ParquetScanFunction::name});
     auto scanInput = dynamic_cast_checked<ExtraScanTableFuncBindInput*>(input->extraInput.get());
     const auto& options = scanInput->fileScanInfo.options;
     // The user-facing COPY options are `IGNORE_ERRORS=true` and `IGNORE_ERRORS=true
@@ -748,6 +751,7 @@ static std::unique_ptr<TableFuncBindData> bindFunc(main::ClientContext* context,
 
 static std::unique_ptr<TableFuncSharedState> initSharedState(
     const TableFuncInitSharedStateInput& input) {
+    binder::refuseRootedQuery(*input.context->clientContext, std::string_view{ParquetScanFunction::name});
     auto bindData = input.bindData->constPtrCast<ScanFileBindData>();
     return std::make_unique<ParquetScanSharedState>(bindData->fileScanInfo.copy(),
         bindData->numRows, bindData->context, bindData->getColumnSkips());

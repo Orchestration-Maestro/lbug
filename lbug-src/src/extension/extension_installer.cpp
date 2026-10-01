@@ -1,5 +1,7 @@
 #include "extension/extension_installer.h"
 
+#include "binder/rooted_query_refusal.h"
+
 #include <atomic>
 #include <thread>
 
@@ -98,6 +100,7 @@ void ExtensionInstaller::tryDownloadExtensionFile(const ExtensionRepoInfo& repoI
 }
 
 bool ExtensionInstaller::install() {
+    binder::refuseRootedQuery(context, ExtensionAction::INSTALL);
 #ifdef LBUG_NO_EXTENSION_INSTALLER
     // Fail clearly rather than fall back to an unencrypted download.
     throw common::IOException(std::format(

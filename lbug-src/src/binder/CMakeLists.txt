@@ -9,6 +9,7 @@ add_subdirectory(visitor)
 add_library(lbug_binder
         OBJECT
         binder.cpp
+        rooted_query_refusal.cpp
         binder_scope.cpp
         bound_statement_result.cpp
         bound_scan_source.cpp

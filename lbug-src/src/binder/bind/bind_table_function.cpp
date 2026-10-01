@@ -1,5 +1,6 @@
 #include "binder/binder.h"
 #include "binder/bound_table_scan_info.h"
+#include "binder/rooted_query_refusal.h"
 #include "binder/expression/expression_util.h"
 #include "binder/expression/literal_expression.h"
 #include "catalog/catalog.h"
@@ -43,6 +44,7 @@ BoundTableScanInfo Binder::bindTableFunc(const std::string& tableFuncName,
     auto func = BuiltInFunctionsUtils::matchFunction(tableFuncName, positionalParamTypes,
         entry->ptrCast<catalog::FunctionCatalogEntry>());
     auto tableFunc = func->constPtrCast<TableFunction>();
+    refuseRootedQuery(*clientContext, std::string_view{tableFunc->name});
     std::vector<LogicalType> inputTypes;
     if (tableFunc->inferInputTypes) {
         // For functions which take in nested data types, we have to use the input parameters to

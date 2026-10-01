@@ -4,6 +4,7 @@
 #include <sys/stat.h>
 
 #include "binder/binder.h"
+#include "binder/rooted_query_refusal.h"
 #include "common/exception/binder.h"
 #include "processor/execution_context.h"
 #include "processor/operator/persistent/reader/reader_bind_utils.h"
@@ -300,6 +301,7 @@ static void bindColumns(const FileScanInfo& fileScanInfo, std::vector<std::strin
 
 static std::unique_ptr<TableFuncBindData> bindFunc(main::ClientContext* context,
     const TableFuncBindInput* input) {
+    binder::refuseRootedQuery(*context, std::string_view{NpyScanFunction::name});
     auto scanInput = dynamic_cast_checked<ExtraScanTableFuncBindInput*>(input->extraInput.get());
     if (scanInput->fileScanInfo.options.size() > 1 ||
         (scanInput->fileScanInfo.options.size() == 1 &&
@@ -332,6 +334,7 @@ static std::unique_ptr<TableFuncBindData> bindFunc(main::ClientContext* context,
 
 static std::unique_ptr<TableFuncSharedState> initSharedState(
     const TableFuncInitSharedStateInput& input) {
+    binder::refuseRootedQuery(*input.context->clientContext, std::string_view{NpyScanFunction::name});
     auto bindData = input.bindData->constPtrCast<ScanFileBindData>();
     auto reader = make_unique<NpyReader>(bindData->fileScanInfo.filePaths[0]);
     return std::make_unique<NpyScanSharedState>(bindData->fileScanInfo.copy(), bindData->numRows);

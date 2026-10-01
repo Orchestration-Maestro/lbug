@@ -1,4 +1,4 @@
-# Restricted projection filesystem: E01a / E01b / E02a
+# Restricted projection filesystem: E01a / E01b / E01c / E02a
 
 These are native safety slices, **not a qualified engine isolation boundary yet**.
 Maestro must not adopt restricted mode until every E01 slice and E02 have landed and the
@@ -39,10 +39,10 @@ bypassing the ownership boundary are unsupported.
 
 ## Live operations and closed seams
 
-| Operation | E01a / E01b disposition | Callers / remaining slice |
+| Operation | E01a / E01b / E01c disposition | Callers / remaining slice |
 | --- | --- | --- |
 | Local `openFile` read/write/create/truncate | Unix held-dirfd `fstatat`/`openat`; regular single-link identity checked before content access; truncation delayed until validation and lock acquisition; newly created names directory-synced | `storage/file_handle.cpp`, shadow, WAL, checkpointer |
-| Startup and `fileOrPathExists` | Rooted no-follow regular-file probe; unsafe objects/errors are not absence; every later open rechecks | Database startup, WAL, checkpoint lock discovery; static legacy `fileExists` remains deferred to query refusals |
+| Startup and `fileOrPathExists` | Rooted no-follow regular-file probe; unsafe objects/errors are not absence; every later open rechecks | Database startup, WAL, checkpoint lock discovery; static legacy `fileExists` is unreachable from rooted file-scan binding |
 | Native read/write locks | `fcntl` on the validated descriptor; rooted writable startup acquires and retains the database write lock before companion adoption or eager spill cleanup, then transfers that same descriptor into the data FileHandle after shadow replay | File handles and checkpoint locks; refused second writers preserve live bytes/dev/ino |
 | Root / remembered leaf replacement | Held ancestor identities and observed child identities revalidated; external disappearance/replacement refused | Supported rename/unlink explicitly transfer or revoke identity ownership |
 | Rename, including base `FileSystem` | Same held root/name pair in base, local and virtual FS; owned database/exact-companion source; atomic no-overwrite publication; replacement only of an already owned, identity-validated exact companion | WAL rotation; graph/partition rename remains refused by ownership |
@@ -50,8 +50,9 @@ bypassing the ownership boundary are unsupported.
 | Spill and bulk-insert temp | Writable spill activation/reset under the held root; generated PK temps allocated create-new, registered by identity and unlinked through the same rooted removal | Forced-pressure spill/reload; operator's real no-index PK validator; see loader limitation below |
 | Checkpoint and writable WAL/shadow recovery | Enabled on Unix; adoption is under the startup write lock; recoverable shadows remain until every checkpoint target's data-file sync completes and the checkpoint WAL is durably removed; read-only startup never adopts or creates sidecars | Checkpoint/rollback, held-handle WAL/shadow replay and cleanup crash cuts |
 | File / directory durability | File I/O/sync uses validated descriptors; every supported name creation/rename/unlink syncs the held directory, revalidating ancestors before and after sync; WAL replay uses that handle, with no pathname reopen or ambient `.` fallback | Durability/identity errors throw, not success; directory-sync failure permanently poisons the capability |
-| Copy/overwrite, createDir, glob, expandPath | Still refused in restricted mode; no ambient fallback. These flows need no directory-creation primitive | Later E01 slices |
-| Alternative VFS registration/dispatch | Still refused; only local rooted handles supported | Later E01 dispatch slice |
+| Copy/overwrite, createDir, glob, expandPath | Native E01a refusals retained, no ambient fallback; E01c refuses file queries before these primitives | COPY/import/export, extension install/load, file-scan binding |
+| Alternative VFS registration/dispatch | Native registration refused; E01c refuses file-scan sources before glob, existence checks or function dispatch | Only local rooted handles supported |
+| External query features | E01c typed structural bind-time refusals; contextual runtime/recovery helpers share the same table | Extension install/load/uninstall, COPY FROM/TO, import/export, ATTACH/DETACH, CSV/NPY/Parquet scans and external Parquet storage |
 | Windows capability / restricted construction | Unsupported, fails closed before database I/O | E02 |
 
 ### Companion ownership and publication
@@ -125,9 +126,9 @@ the distinct, explicit writable-recovery adoption contract above.
 Run `bash scripts/audit-native-filesystem.sh` on the candidate revision. The diagnostic scan
 includes direct Unix rename-family/syscall calls; new hits require operation/caller review.
 The scan has **630 hits**, versus 629 at the E01b baseline and 616 at the E01a baseline.
-The new hit is the rooted startup database lock open; all scans exit 0. Full candidate output
-and the exact command are recorded in the E01b fix report. This scan does not qualify deferred
-rows.
+The E01b new hit is the rooted startup database lock open. E01c keeps the count at 630:
+query refusals add no native filesystem operation. Candidate commands and output are recorded
+in the E01c report. This scan does not qualify deferred rows.
 
 - WAL replay's former direct directory `open` moved behind `FileSystem::syncDirectoryForFile`.
   Its unrestricted implementation retains legacy behavior; rooted calls select the held
@@ -136,13 +137,32 @@ rows.
   operator constructor, using real chunks and a one-byte spill threshold. The factory is in
   the internal `batch_insert` namespace, not a new exported/public API or a test-only branch.
   Prepared ordinary writes map to `Insert`; `NodeBatchInsert` is reached by the COPY planner.
-  Rooted COPY's glob remains refused. **E07b must prove the prepared bound loader end to end**;
+  E01c refuses rooted COPY before its glob. **E07b must prove the prepared bound loader end to end**;
   this operator-level bulk test is not that qualification.
-- Extension dynamic loads/recursive uninstall, COPY/import/export, ATTACH/DETACH and direct
-  NPY mapping still require E01c's query refusals. Do not expose these queries in an interim
-  deployment. Static `LocalFileSystem::fileExists` remains unrestricted for the legacy binder.
-- Copy/overwrite, directory creation, query refusals, alternative-VFS dispatch, Windows safety
-  and `build.rs` are unchanged by E01b.
+- E01c closes extension dynamic loads/recursive uninstall, COPY/import/export, ATTACH/DETACH,
+  direct NPY mapping and remaining external file-scan routes. Static
+  `LocalFileSystem::fileExists` remains unrestricted for unrooted binding, but rooted file
+  sources refuse before it. No native copy/overwrite or directory-creation primitive was enabled.
+- Windows safety and `build.rs` are unchanged; the full E01/E02/E07 qualification remains required.
+
+### Query refusal policy
+
+`binder/rooted_query_refusal.cpp` holds one table of 15 structural keys: statement types,
+extension actions, file-scan source kind, resolved built-in reader function names, and
+`StorageFormat::ICEBUG_DISK`. Binders check before any feature-specific filesystem work;
+EXPLAIN and PROFILE recurse through that same binding. There is no SQL text matching.
+Every refusal is a `BinderException` with the platform-independent message
+`Rooted mode refuses <feature>.` Unrooted calls return from the policy without changing
+upstream behavior.
+
+Contextual non-binder boundaries share the table: WAL extension replay's manager load,
+extension installation and recursive uninstall, attached-database construction/operators,
+import/export operators and export directory planning, CSV/Parquet export initialization,
+CSV/NPY/Parquet reader binding/planning and raw contextual CSV/Parquet readers. External
+Parquet node/rel DDL refuses at bind time; the corresponding table constructors refuse
+before path resolution during startup or WAL catalog recreation. Anonymous buffer-manager
+mapping and Arrow in-memory storage are unchanged. No query-only guard is relied on for
+persisted extension or external-table reconstruction.
 
 ## E02a Windows namespace-barrier feasibility
 
@@ -202,8 +222,15 @@ immutable-snapshot durability policy is adopted here.
 ## Tests
 
 Configure `tests/native_safety` into `target/native-safety`, build with `--parallel 3`, and run
-CTest with `--verbose --output-on-failure`. The three executables cover E01a opens/locks and
-closed seams, E01b rename/remove/adoption/durability operations, and the full native flows.
+CTest with `--verbose --output-on-failure`. The four executables cover E01a opens/locks and
+closed seams, E01b rename/remove/adoption/durability operations, full native flows and E01c
+query/helper refusals. Query probes assert typed early errors, unchanged sentinel bytes,
+dev/ino and recursive directory listings; Linux linker wrapping additionally observes
+ambient open/probe/mapping/load calls. Persisted external-table startup allows rooted
+header reads but no external probe/open. Unrooted controls exercise real COPY/import/export,
+load/uninstall, attach/detach, reader binding and external-table creation/scanning; extension
+install prepares without execution because the harness disables its network installer.
+Windows still refuses capability acquisition, before a rooted query context can exist.
 Outside sentinel bytes and identity are checked. Tests exercise ancestor swaps, links,
 existing destinations, aliases, unrelated stems, directories, replaced/disappeared identities,
 atomic destination races, syscall/durability failures and generated-temp collisions/cleanup.

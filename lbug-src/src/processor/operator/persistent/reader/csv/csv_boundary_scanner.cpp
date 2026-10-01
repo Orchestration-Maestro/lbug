@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 
+#include "binder/rooted_query_refusal.h"
 #include "common/constants.h"
 #include "common/file_system/virtual_file_system.h"
 #include "main/client_context.h"
@@ -502,6 +503,7 @@ CSVOverlapBoundaryResult scanOverlapForBoundary(FileInfo* fileInfo, uint64_t fil
 
 CSVBoundaryScanResult CSVBoundaryScanner::planFixedChunkOverlap(const std::string& filePath,
     idx_t fileIdx, const CSVOption& option, main::ClientContext* context) {
+    binder::refuseRootedQuery(*context, ScanSourceType::FILE);
     auto fileInfo = VirtualFileSystem::GetUnsafe(*context)->openFile(filePath,
         FileOpenFlags(FileFlags::READ_ONLY
 #ifdef _WIN32

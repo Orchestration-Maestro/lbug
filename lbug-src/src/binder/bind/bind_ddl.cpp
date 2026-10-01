@@ -1,6 +1,7 @@
 #include <optional>
 
 #include "binder/binder.h"
+#include "binder/rooted_query_refusal.h"
 #include "binder/ddl/bound_alter.h"
 #include "binder/ddl/bound_create_index.h"
 #include "binder/ddl/bound_create_sequence.h"
@@ -258,6 +259,7 @@ BoundCreateTableInfo Binder::bindCreateNodeTableInfo(const CreateTableInfo* info
     auto boundOptions = bindParsingOptions(extraInfo.options);
     auto storage = getStorage(boundOptions);
     auto storageFormat = getStorageFormat(boundOptions);
+    refuseRootedQuery(*clientContext, storageFormat);
     std::optional<BoundPartitionInfo> partitionInfo;
     if (extraInfo.partitionInfo.has_value()) {
         const auto& parsed = *extraInfo.partitionInfo;
@@ -318,6 +320,7 @@ BoundCreateTableInfo Binder::bindCreateRelTableGroupInfo(const CreateTableInfo* 
     auto storageDirection = getStorageDirection(boundOptions);
     auto storage = getStorage(boundOptions);
     auto storageFormat = getStorageFormat(boundOptions);
+    refuseRootedQuery(*clientContext, storageFormat);
     std::optional<function::TableFunction> scanFunction = std::nullopt;
     std::optional<std::unique_ptr<function::TableFuncBindData>> scanBindData = std::nullopt;
     std::string foreignDatabaseName;

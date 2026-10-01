@@ -1,5 +1,6 @@
 #include "binder/binder.h"
 #include "binder/bound_extension_statement.h"
+#include "binder/rooted_query_refusal.h"
 #include "common/exception/binder.h"
 #include "common/file_system/local_file_system.h"
 #include "common/string_utils.h"
@@ -57,6 +58,7 @@ std::unique_ptr<BoundStatement> Binder::bindExtension(const Statement& statement
 #endif
     auto extensionStatement = statement.constPtrCast<ExtensionStatement>();
     auto auxInfo = extensionStatement->getAuxInfo();
+    refuseRootedQuery(*clientContext, auxInfo->action);
     switch (auxInfo->action) {
     case ExtensionAction::INSTALL:
         bindInstallExtension(*auxInfo);

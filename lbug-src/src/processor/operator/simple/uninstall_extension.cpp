@@ -1,5 +1,6 @@
 #include "processor/operator/simple/uninstall_extension.h"
 
+#include "binder/rooted_query_refusal.h"
 #include "common/exception/runtime.h"
 #include "common/file_system/virtual_file_system.h"
 #include "extension/extension.h"
@@ -16,6 +17,7 @@ using namespace lbug::extension;
 
 void UninstallExtension::executeInternal(ExecutionContext* context) {
     auto clientContext = context->clientContext;
+    binder::refuseRootedQuery(*clientContext, ExtensionAction::UNINSTALL);
     auto vfs = VirtualFileSystem::GetUnsafe(*clientContext);
     auto localLibFilePath = ExtensionUtils::getLocalPathForExtensionLib(clientContext, path);
     if (!vfs->fileOrPathExists(localLibFilePath)) {

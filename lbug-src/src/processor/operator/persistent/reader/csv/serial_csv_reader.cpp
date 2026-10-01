@@ -1,6 +1,7 @@
 #include "processor/operator/persistent/reader/csv/serial_csv_reader.h"
 
 #include "binder/binder.h"
+#include "binder/rooted_query_refusal.h"
 #include "function/table/bind_data.h"
 #include "function/table/table_function.h"
 #include "processor/execution_context.h"
@@ -184,6 +185,7 @@ void SerialCSVScan::bindColumns(const ExtraScanTableFuncBindInput* bindInput,
 
 static std::unique_ptr<TableFuncBindData> bindFunc(main::ClientContext* context,
     const TableFuncBindInput* input) {
+    binder::refuseRootedQuery(*context, std::string_view{SerialCSVScan::name});
     auto scanInput = dynamic_cast_checked<ExtraScanTableFuncBindInput*>(input->extraInput.get());
     if (scanInput->expectedColumnTypes.size() > 0) {
         scanInput->fileScanInfo.options.insert_or_assign("SAMPLE_SIZE",
@@ -240,6 +242,7 @@ static std::unique_ptr<TableFuncBindData> bindFunc(main::ClientContext* context,
 
 static std::unique_ptr<TableFuncSharedState> initSharedState(
     const TableFuncInitSharedStateInput& input) {
+    binder::refuseRootedQuery(*input.context->clientContext, std::string_view{SerialCSVScan::name});
     auto bindData = input.bindData->constPtrCast<ScanFileBindData>();
     auto csvOption = CSVReaderConfig::construct(bindData->fileScanInfo.options).option;
     auto columnInfo = CSVColumnInfo(bindData->getNumColumns() - bindData->numWarningDataColumns,

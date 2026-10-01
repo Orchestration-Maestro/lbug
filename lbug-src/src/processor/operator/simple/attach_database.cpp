@@ -1,5 +1,6 @@
 #include "processor/operator/simple/attach_database.h"
 
+#include "binder/rooted_query_refusal.h"
 #include "common/exception/runtime.h"
 #include "common/string_utils.h"
 #include "main/attached_database.h"
@@ -30,6 +31,7 @@ static std::string attachMessage() {
 
 void AttachDatabase::executeInternal(ExecutionContext* context) {
     auto client = context->clientContext;
+    binder::refuseRootedQuery(*client, common::StatementType::ATTACH_DATABASE);
     auto databaseManager = main::DatabaseManager::Get(*client);
     auto memoryManager = storage::MemoryManager::Get(*client);
     if (common::StringUtils::getUpper(attachInfo.dbType) == common::ATTACHED_LBUG_DB_TYPE) {

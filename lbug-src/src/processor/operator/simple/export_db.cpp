@@ -2,6 +2,7 @@
 
 #include <sstream>
 
+#include "binder/rooted_query_refusal.h"
 #include "catalog/catalog.h"
 #include "catalog/catalog_entry/index_catalog_entry.h"
 #include "catalog/catalog_entry/node_table_catalog_entry.h"
@@ -185,6 +186,7 @@ std::string getIndexCypher(ClientContext* clientContext, const FileScanInfo& exp
 
 void ExportDB::executeInternal(ExecutionContext* context) {
     const auto clientContext = context->clientContext;
+    binder::refuseRootedQuery(*clientContext, StatementType::EXPORT_DATABASE);
     // write the schema.cypher file
     writeStringStreamToFile(clientContext, getSchemaCypher(clientContext),
         boundFileInfo.filePaths[0] + "/" + PortDBConstants::SCHEMA_FILE_NAME);

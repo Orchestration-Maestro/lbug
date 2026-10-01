@@ -1,5 +1,6 @@
 #include "processor/operator/persistent/writer/parquet/parquet_writer.h"
 
+#include "binder/rooted_query_refusal.h"
 #include "common/constants.h"
 #include "common/data_chunk/data_chunk.h"
 #include "common/exception/runtime.h"
@@ -21,6 +22,7 @@ ParquetWriter::ParquetWriter(std::string fileName, std::vector<common::LogicalTy
     main::ClientContext* context)
     : fileName{std::move(fileName)}, types{std::move(types)}, columnNames{std::move(columnNames)},
       codec{codec}, fileOffset{0}, mm{storage::MemoryManager::Get(*context)} {
+    binder::refuseRootedQuery(*context, StatementType::COPY_TO);
     fileInfo = VirtualFileSystem::GetUnsafe(*context)->openFile(this->fileName,
         FileOpenFlags(FileFlags::WRITE | FileFlags::CREATE_AND_TRUNCATE_IF_EXISTS), context);
     // Parquet files start with the string "PAR1".

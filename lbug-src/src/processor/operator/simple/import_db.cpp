@@ -1,5 +1,6 @@
 #include "processor/operator/simple/import_db.h"
 
+#include "binder/rooted_query_refusal.h"
 #include "common/exception/runtime.h"
 #include "main/client_context.h"
 #include "processor/execution_context.h"
@@ -25,6 +26,7 @@ static void validateQueryResult(main::QueryResult* queryResult) {
 
 void ImportDB::executeInternal(ExecutionContext* context) {
     auto clientContext = context->clientContext;
+    binder::refuseRootedQuery(*clientContext, StatementType::IMPORT_DATABASE);
     if (query.empty()) { // Export empty database.
         appendMessage("Imported database successfully.",
             storage::MemoryManager::Get(*clientContext));

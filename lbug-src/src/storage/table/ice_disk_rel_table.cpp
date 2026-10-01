@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <queue>
 
+#include "binder/rooted_query_refusal.h"
 #include "catalog/catalog_entry/rel_group_catalog_entry.h"
 #include "common/assert.h"
 #include "common/data_chunk/sel_vector.h"
@@ -70,6 +71,7 @@ IceDiskRelTable::IceDiskRelTable(RelGroupCatalogEntry* relGroupEntry, table_id_t
     main::ClientContext* context)
     : ColumnarRelTableBase{relGroupEntry, fromTableID, toTableID, storageManager, memoryManager},
       layout{IceDiskRelTableLayout::CSR} {
+    binder::refuseRootedQuery(*context, StorageFormat::ICEBUG_DISK);
     const auto& storage = relGroupEntry->getStorage();
     if (common::StringUtils::getLower(storage).ends_with("parquet")) {
         layout = IceDiskRelTableLayout::FLAT;

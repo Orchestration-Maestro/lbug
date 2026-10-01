@@ -1,3 +1,4 @@
+#include "binder/rooted_query_refusal.h"
 #include "common/exception/runtime.h"
 #include "common/file_system/virtual_file_system.h"
 #include "extension/mapper_extension.h"
@@ -76,6 +77,7 @@ static void exportDatabaseCollectParallelFlags(const std::unique_ptr<DummySimple
 
 std::unique_ptr<PhysicalOperator> PlanMapper::mapExportDatabase(
     const LogicalOperator* logicalOperator) {
+    binder::refuseRootedQuery(*clientContext, StatementType::EXPORT_DATABASE);
     auto exportDatabase = logicalOperator->constPtrCast<LogicalExportDatabase>();
     auto fs = VirtualFileSystem::GetUnsafe(*clientContext);
     auto boundFileInfo = exportDatabase->getBoundFileInfo();
