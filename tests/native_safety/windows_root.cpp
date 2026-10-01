@@ -64,7 +64,7 @@ int main(int argc, char** argv) {
         }
         require(argc >= 2, "SETUP scratch argument");
         user(true);
-        auto parent = fs::path(argv[1]) / ("root-" + std::to_string(GetCurrentProcessId()));
+        auto parent = fs::path(argv[1]).make_preferred() / ("root-" + std::to_string(GetCurrentProcessId()));
         fs::create_directories(parent / "root");
         auto path = parent / "root";
         makePrivate(path);
@@ -238,16 +238,17 @@ int main(int argc, char** argv) {
             auto fixture = parent / "security";
             fs::create_directory(fixture); makePrivate(fixture);
             auto broad = [&](const fs::path& p) {
-                auto h = hold(CreateFileW(p.c_str(), WRITE_DAC, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                auto h = hold(CreateFileW(p.c_str(), READ_CONTROL | WRITE_DAC | FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                     nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr));
                 PSECURITY_DESCRIPTOR sd = nullptr;
-                auto sddl = "D:P(A;OICI;FA;;;" + user() + ")(A;OICI;FA;;;WD)";
+                const std::string inheritance = fs::is_directory(p) ? "OICI" : "";
+                auto sddl = "D:P(A;" + inheritance + ";FA;;;" + user() + ")(A;" + inheritance + ";FA;;;WD)";
                 require(ConvertStringSecurityDescriptorToSecurityDescriptorA(sddl.c_str(), SDDL_REVISION_1, &sd, nullptr), "SETUP unsafe DACL");
                 BOOL present, defaulted; PACL acl;
                 require(GetSecurityDescriptorDacl(sd, &present, &acl, &defaulted), "SETUP unsafe DACL decode");
                 auto error = SetSecurityInfo(h.get(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
                     nullptr, nullptr, acl, nullptr);
-                LocalFree(sd); require(error == ERROR_SUCCESS, "SETUP unsafe DACL apply");
+                LocalFree(sd); require(error == ERROR_SUCCESS, "SETUP unsafe DACL apply error=" + std::to_string(error));
             };
             std::ofstream(fixture / "child") << "private";
             {
