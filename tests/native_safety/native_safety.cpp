@@ -1,3 +1,5 @@
+#include "private_root_test_support.h"
+#include "common/exception/io.h"
 #include "common/file_system/local_file_system.h"
 #include "common/file_system/virtual_file_system.h"
 #include "main/connection.h"
@@ -8,6 +10,7 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <set>
 #include <tuple>
 #include <type_traits>
 #include <utility>
@@ -82,6 +85,7 @@ int main() {
     auto dir = fs::temp_directory_path() / ("maestro-native-" + std::to_string(getpid()));
     fs::remove_all(dir);
     fs::create_directories(dir / "parent" / "root");
+    makePrivateTestRoot(dir / "parent" / "root");
     fs::create_directory(dir / "outside");
     auto rootPath = fs::canonical(dir / "parent" / "root");
     auto sibling = fs::canonical(dir / "outside");
@@ -105,6 +109,77 @@ int main() {
     auto checked = [&](auto operation) -> decltype(operation()) {
         return checkedAt(rootPath, std::move(operation));
     };
+    auto privateRootParent = dir / "private-root-contract";
+    fs::create_directory(privateRootParent);
+    // Held ancestors need not be private; only the selected root does.
+    require(chmod(privateRootParent.c_str(), 0777) == 0, "set public ancestor mode");
+    auto entries = [](const fs::path& path) {
+        std::set<std::string> result;
+        for (const auto& entry : fs::directory_iterator(path)) {
+            result.insert(entry.path().filename().string());
+        }
+        return result;
+    };
+    auto refusesWritableRoot = [&](const char* name, mode_t mode) {
+        auto path = privateRootParent / name;
+        fs::create_directory(path);
+        auto marker = path / "sentinel";
+        std::ofstream(marker) << "private-root sentinel";
+        require(chmod(path.c_str(), mode) == 0, "set root mode");
+        struct stat rootBefore{}, markerBefore{};
+        require(lstat(path.c_str(), &rootBefore) == 0 &&
+            lstat(marker.c_str(), &markerBefore) == 0, "private root snapshot");
+        auto listing = entries(path);
+        bool rejected = false;
+        try { RootDirectory::open(path.string()); }
+        catch (const IOException& e) {
+            rejected = std::string(e.what()).find("owned by the current user and not writable by group or others") != std::string::npos;
+        }
+        struct stat rootAfter{}, markerAfter{};
+        require(lstat(path.c_str(), &rootAfter) == 0 &&
+            rootAfter.st_dev == rootBefore.st_dev && rootAfter.st_ino == rootBefore.st_ino,
+            "refused root identity changed");
+        require(lstat(marker.c_str(), &markerAfter) == 0 &&
+            markerAfter.st_dev == markerBefore.st_dev && markerAfter.st_ino == markerBefore.st_ino &&
+            bytes(marker) == "private-root sentinel", "refused root sentinel changed");
+        require(entries(path) == listing && !fs::exists(path / "db.lbdb"),
+            "refused root listing changed or database created");
+        require(rejected, "writable root accepted or private-root IOException missing");
+    };
+    test("rooted_open_refuses_group_writable_root", [&] {
+        refusesWritableRoot("group-writable", 0770);
+    });
+    test("rooted_open_refuses_other_writable_root", [&] {
+        refusesWritableRoot("other-writable", 0707);
+    });
+    test("rooted_open_refuses_foreign_owner_root", [&] {
+        if (geteuid() == 0) {
+            std::cout << "SKIP rooted_open_refuses_foreign_owner_root: effective user is root\n";
+            return;
+        }
+        struct stat info{};
+        require(lstat("/", &info) == 0 && info.st_uid == 0, "foreign root must be root-owned");
+        bool rejected = false;
+        try { RootDirectory::open("/"); }
+        catch (const IOException& e) {
+            rejected = std::string(e.what()).find("owned by the current user") != std::string::npos;
+        }
+        require(rejected, "foreign-owned root accepted or owner IOException missing");
+    });
+    test("rooted_open_accepts_private_roots", [&] {
+        for (auto mode : {0700, 0755}) {
+            auto path = privateRootParent / ("private-" + std::to_string(mode));
+            fs::create_directory(path);
+            require(chmod(path.c_str(), mode) == 0, "set private root mode");
+            auto capability = RootDirectory::open(path.string());
+            auto config = lbug::main::SystemConfig(16 * 1024 * 1024, 1);
+            config.maxDBSize = 64 * 1024 * 1024;
+            config.forceCheckpointOnClose = false;
+            { lbug::main::Database db(capability, "db.lbdb", config); }
+            config.readOnly = true;
+            { lbug::main::Database db(RootDirectory::open(path.string()), "db.lbdb", config); }
+        }
+    });
     auto root = checked([&] { return RootDirectory::open(rootPath.string()); });
     LocalFileSystem local("db.lbdb", root);
     VirtualFileSystem vfs("db.lbdb", root);
@@ -304,6 +379,7 @@ int main() {
     test("root replacement refused all modes", [&] {
         auto isolated = dir / "isolated";
         fs::create_directory(isolated);
+        makePrivateTestRoot(isolated);
         auto cap = checkedAt(isolated, [&] { return RootDirectory::open(isolated.string()); });
         LocalFileSystem isolatedFS("db.lbdb", cap);
         fs::rename(isolated, dir / "old-isolated");
@@ -324,11 +400,13 @@ int main() {
         auto parent = dir / "real-parent";
         auto held = parent / "root";
         fs::create_directories(held);
+        makePrivateTestRoot(held);
         std::ofstream(held / "db.lbdb") << "original";
         auto cap = RootDirectory::open(held.string());
         LocalFileSystem isolatedFS("db.lbdb", cap);
         fs::rename(parent, dir / "real-parent-old");
         fs::create_directories(held);
+        makePrivateTestRoot(held);
         std::ofstream(held / "db.lbdb") << "replacement";
         refused([&] { isolatedFS.openFile("db.lbdb", FileOpenFlags(FileFlags::READ_ONLY)); }, "ancestor identity");
         refused([&] { isolatedFS.fileOrPathExists("db.lbdb"); }, "ancestor identity");

@@ -1,4 +1,5 @@
 #pragma once
+#include "private_root_test_support.h"
 #include "common/file_system/local_file_system.h"
 #include "common/file_system/virtual_file_system.h"
 #include "storage/storage_utils.h"
@@ -40,6 +41,7 @@ struct Fixture {
     Fixture() {
         fs::remove_all(dir);
         fs::create_directories(path);
+        makePrivateTestRoot(path);
         fs::create_directory(dir / "outside");
         std::ofstream(sentinel) << "outside sentinel";
         require(lstat(sentinel.c_str(), &original) == 0, "sentinel stat");
