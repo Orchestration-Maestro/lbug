@@ -1,5 +1,6 @@
 #pragma once
-// Linux linker wrapping observes ambient probes/opens as well as rooted calls.
+// Linux linker wrapping plus the harness's static libstdc++ observes ambient
+// std::filesystem probes/opens as well as rooted calls.
 #ifdef MAESTRO_SYSCALL_WRAP
 #include <cstdarg>
 #include <cstdio>

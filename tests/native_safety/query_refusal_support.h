@@ -1,5 +1,4 @@
 #pragma once
-#include "rooted_test_support.h"
 #include "binder/binder.h"
 #include "common/exception/binder.h"
 #include "extension/extension.h"
@@ -13,6 +12,8 @@
 #include "processor/operator/persistent/reader/npy/npy_reader.h"
 #include "processor/operator/persistent/reader/parquet/parquet_reader.h"
 #include "storage/storage_manager.h"
+// Import common names only after SDK-facing engine headers (Windows UUID).
+#include "rooted_test_support.h"
 #include <map>
 #ifndef _WIN32
 using namespace lbug::main;
@@ -109,19 +110,23 @@ struct QueryFixture : Fixture {
           query(c, "COPY (RETURN 7 AS id) TO " + quoted(parquet)); }
     }
 };
-struct QueryCase { const char* feature; std::function<std::string(QueryFixture&)> sql; };
+struct QueryCase {
+    const char* feature;
+    std::function<std::string(QueryFixture&)> sql;
+    const char* readOnlyError = nullptr;
+};
 const QueryCase queryCases[]{
     {"extension install", [](auto&) { return "INSTALL httpfs"; }},
     {"extension load", [](auto&) { return "LOAD EXTENSION '" MAESTRO_REFUSAL_EXTENSION "'"; }},
     {"extension uninstall", [](auto&) { return "UNINSTALL httpfs"; }},
-    {"COPY FROM", [](auto& f) { return "COPY Item FROM " + quoted(f.csv); }},
+    {"COPY FROM", [](auto& f) { return "COPY Item FROM " + quoted(f.csv); }, "Connection exception: Cannot execute write operations in a read-only database!"},
     {"COPY TO", [](auto& f) { return "COPY (RETURN 7 AS id) TO " + quoted(f.sentinel); }},
     {"database import", [](auto& f) { return "IMPORT DATABASE " + quoted(f.imported); }},
     {"database export", [](auto& f) { return "EXPORT DATABASE " + quoted(f.dir / "outside" / "exported") + " (FORMAT='CSV')"; }},
     {"ATTACH", [](auto& f) { return "ATTACH " + quoted(f.attached) + " AS other (DBTYPE LBUG)"; }},
     {"DETACH", [](auto&) { return "DETACH other"; }},
     {"file scan", [](auto& f) { return "LOAD FROM " + quoted(f.csv) + " RETURN *"; }},
-    {"external Parquet storage", [](auto& f) { return "CREATE NODE TABLE External(id INT64, PRIMARY KEY(id)) WITH (STORAGE=" + quoted(f.parquet) + ", FORMAT='icebug-disk')"; }},
+    {"external Parquet storage", [](auto& f) { return "CREATE NODE TABLE External(id INT64, PRIMARY KEY(id)) WITH (STORAGE=" + quoted(f.parquet) + ", FORMAT='icebug-disk')"; }, "Connection exception: Cannot execute write operations in a read-only database!"},
 };
 struct FunctionCase {
     const char* feature; FileType type; const char* format;

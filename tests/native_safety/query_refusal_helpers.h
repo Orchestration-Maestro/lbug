@@ -2,6 +2,7 @@
 #include "query_refusal_support.h"
 #ifndef _WIN32
 #include "catalog/catalog.h"
+#include "function/built_in_function_utils.h"
 #include "extension/extension_installer.h"
 #include "extension/extension_manager.h"
 #include "function/export/export_function.h"
@@ -102,6 +103,53 @@ template<class T> void helperTests(T test) {
         helperRefusal("ATTACH", [](auto& f, auto& c) {
             AttachedLbugDatabase attached(f.attached.string(), "other", ATTACHED_LBUG_DB_TYPE, c.getClientContext());
         });
+    });
+    test("rooted operator non-LBUG ATTACH", [] {
+        helperRefusal("ATTACH", [](auto& f, auto& c) {
+            auto ctx = c.getClientContext();
+            auto message = FactorizedTableUtils::getSingleStringColumnFTable(lbug::storage::MemoryManager::Get(*ctx));
+            ExecutionContext context(nullptr, ctx, 0);
+            AttachDatabase op(AttachInfo{f.attached.string(), "other", "sqlite", {}}, message, 0, nullptr);
+            op.executeInternal(&context);
+        });
+    });
+    for (const auto& row : functionCases) {
+        test("rooted pre-inference guard " + std::string(row.feature), [&] {
+            helperRefusal(row.feature, [&](auto& f, auto& c) {
+                auto ctx = c.getClientContext();
+                auto functions = row.functions();
+                const auto name = functions[0]->name;
+                auto entry = lbug::catalog::Catalog::Get(*ctx)->getFunctionEntry(
+                    lbug::transaction::Transaction::Get(*ctx), name)->template ptrCast<lbug::catalog::FunctionCatalogEntry>();
+                std::vector<LogicalType> inputTypes; inputTypes.push_back(LogicalType::STRING());
+                auto resolved = BuiltInFunctionsUtils::matchFunction(name, inputTypes, entry)->template ptrCast<TableFunction>();
+                resolved->inferInputTypes = [](const lbug::binder::expression_vector&) -> std::vector<LogicalType> {
+                    throw BinderException{"inference hook ran before rooted refusal"};
+                };
+                auto path = row.type == FileType::NPY ? f.array : row.type == FileType::PARQUET ? f.parquet : f.csv;
+                auto statements = lbug::parser::Parser::parseQuery("CALL " + name + "(" + quoted(path) + ") RETURN *");
+                Binder binder(ctx); binder.bind(*statements[0]);
+            });
+        });
+    }
+    test("rooted Parquet init with unrooted bind data", [] {
+        QueryFixture f; Database db(f.root, "db.lbdb", config()); Connection c(&db);
+        Database source(":memory:", config()); Connection other(&source);
+        auto functions = ParquetScanFunction::getFunctionSet();
+        auto func = functions[0]->ptrCast<TableFunction>();
+        TableFuncBindInput bindInput;
+        bindInput.addLiteralParam(Value::createValue(f.parquet.string()));
+        auto extra = std::make_unique<ExtraScanTableFuncBindInput>();
+        extra->fileScanInfo = FileScanInfo{FileTypeInfo{FileType::PARQUET, "PARQUET"}, {f.parquet.string()}};
+        bindInput.extraInput = std::move(extra);
+        Binder binder(other.getClientContext()); bindInput.binder = &binder;
+        auto data = func->bindFunc(other.getClientContext(), &bindInput);
+        require(data->getNumColumns() == 1, "unrooted Parquet bind lost its column");
+        ExecutionContext context(nullptr, c.getClientContext(), 0);
+        TableFuncInitSharedStateInput input(data.get(), &context);
+        const auto before = snapshots(f, db);
+        typedRefusal([&] { func->initSharedStateFunc(input); }, "Parquet scan");
+        require(snapshots(f, db) == before, "Parquet init refusal changed filesystem"); f.unchanged();
     });
     for (bool parquet : {false, true}) {
         test(std::string("rooted direct export ") + (parquet ? "Parquet" : "CSV truncate"), [=] {

@@ -153,7 +153,8 @@ extension actions, file-scan source kind, resolved built-in reader function name
 EXPLAIN and PROFILE recurse through that same binding. There is no SQL text matching.
 Every refusal is a `BinderException` with the platform-independent message
 `Rooted mode refuses <feature>.` Unrooted calls return from the policy without changing
-upstream behavior.
+upstream behavior. On a read-only database, transaction validation can refuse a write
+statement first, with its own `ConnectionException`, before any file access.
 
 Contextual non-binder boundaries share the table: WAL extension replay's manager load,
 extension installation and recursive uninstall, attached-database construction/operators,

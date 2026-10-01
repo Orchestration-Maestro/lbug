@@ -52,6 +52,9 @@ target_compile_definitions(maestro_query_refusals PRIVATE
     MAESTRO_REFUSAL_EXTENSION="$<TARGET_FILE:maestro_refusal_extension>")
 add_dependencies(maestro_query_refusals maestro_refusal_extension)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    # Bring std::filesystem into the executable so GNU ld --wrap sees its probes.
+    # Test-only, Linux coverage; production keeps its normal C++ runtime linkage.
+    target_link_options(maestro_query_refusals PRIVATE "-static-libstdc++")
     target_compile_definitions(maestro_query_refusals PRIVATE MAESTRO_SYSCALL_WRAP)
     foreach(call open openat stat lstat fstat fstatat fopen dlopen mmap)
         target_link_options(maestro_query_refusals PRIVATE "-Wl,--wrap=${call}")
