@@ -1,0 +1,81 @@
+name: E01e disposable proof
+on:
+  pull_request:
+    branches: [build/lbug-0.20.4-cmake-reuse]
+  workflow_dispatch:
+    inputs:
+      phase:
+        required: true
+        type: choice
+        options: [red, green-mutant]
+permissions:
+  contents: read
+env:
+  E01E_PHASE: ${{ inputs.phase || 'red' }}
+jobs:
+  proof:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Build rooted constructor regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir evidence
+          git rev-parse HEAD | tee evidence/tested-sha.txt
+          cmake -S tests/native_safety -B target/native-safety -DCMAKE_BUILD_TYPE=Release
+          cmake --build target/native-safety --config Release --target maestro_rooted_flows --parallel 3
+      - name: Record red or green
+        shell: bash
+        run: |
+          set -uo pipefail
+          target/native-safety/maestro_rooted_flows 'strict rooted' 2>&1 | tee evidence/regression.txt
+          result=${PIPESTATUS[0]}
+          echo "$result" | tee evidence/regression.exit.txt
+          if [ "$E01E_PHASE" = red ]; then
+            test "$result" = 1 && grep -q 'cases: 2 failures: 2' evidence/regression.txt &&
+              test "$(grep -c 'transient WAL read failure silently accepted' evidence/regression.txt)" = 2
+          else
+            test "$result" = 0 && grep -q 'cases: 2 failures: 0' evidence/regression.txt
+          fi
+      - name: Kill Unix lenient replay mutant and restore
+        if: (inputs.phase || 'red') == 'green-mutant'
+        shell: bash
+        run: |
+          set -euo pipefail
+          source=lbug-src/src/main/database.cpp
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('lbug-src/src/main/database.cpp')
+          old = '    dbConfig->throwOnWalReplayFailure = true;'
+          text = p.read_text()
+          assert text.count(old) == 1
+          p.write_text(text.replace(old, old + '\n#ifndef _WIN32\n    dbConfig->throwOnWalReplayFailure = false;\n#endif'))
+          PY
+          git diff -- "$source" | tee evidence/mutant.diff
+          cmake --build target/native-safety --config Release --target maestro_rooted_flows --parallel 3
+          set +e
+          target/native-safety/maestro_rooted_flows 'strict rooted' 2>&1 | tee evidence/mutant.txt
+          result=${PIPESTATUS[0]}
+          set -e
+          echo "$result" | tee evidence/mutant.exit.txt
+          git checkout -- "$source"
+          git diff --exit-code -- "$source"
+          cmake --build target/native-safety --config Release --target maestro_rooted_flows --parallel 3
+          target/native-safety/maestro_rooted_flows 2>&1 | tee evidence/restored-green.txt
+          test "$result" = 1
+          grep -q 'cases: 2 failures: 2' evidence/mutant.txt
+          test "$(grep -c 'transient WAL read failure silently accepted' evidence/mutant.txt)" = 2
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: e01e-${{ env.E01E_PHASE }}-${{ matrix.os }}-${{ github.sha }}
+          path: evidence
+          if-no-files-found: error

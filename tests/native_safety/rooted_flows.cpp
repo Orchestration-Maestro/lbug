@@ -1,6 +1,7 @@
 #include "rooted_test_support.h"
 #include "main/client_context.h"
 #include "common/exception/buffer_manager.h"
+#include "common/exception/io.h"
 #include "main/connection.h"
 #include "main/database.h"
 #include "main/query_result.h"
@@ -75,6 +76,15 @@ int stopAtShadowUnlink(const char* operation, int directory, const char* name, s
     } else if (std::string(operation) == "directory-sync" && shadowUnlinked) {
         require(fsync(directory) == 0, "sync shadow unlink before kill");
         awaitKill('H');
+    }
+    return 0;
+}
+bool walReadInjected = false;
+int failWALReadOnce(const char* operation, int, const char* name, struct stat*) {
+    if (!walReadInjected && std::string(operation) == "read" && name &&
+        std::string(name) == "strict-wal.lbdb.wal") {
+        walReadInjected = true;
+        throw IOException("transient rooted WAL read failure");
     }
     return 0;
 }
@@ -179,6 +189,32 @@ int main(int argc, char** argv) {
     };
 #ifndef _WIN32
     startupTests(test);
+    for (bool readOnly : {true, false}) {
+        test(readOnly ? "strict rooted read-only WAL replay" : "strict rooted writable WAL replay", [=] {
+            Fixture f;
+            { Database db(f.root, "strict-wal.lbdb", config()); Connection conn(&db); prepare(conn); }
+            const auto wal = f.path / "strict-wal.lbdb.wal";
+            require(fs::exists(wal) && fs::file_size(wal) > 0, "SETUP active WAL missing");
+            const auto originalWAL = bytes(wal);
+            auto c = config(); c.readOnly = readOnly; c.throwOnWalReplayFailure = false;
+            auto root = RootDirectory::open(f.path.string());
+            bool rejected = false;
+            walReadInjected = false;
+            {
+                NativeHook hook(failWALReadOnce);
+                try { Database db(root, "strict-wal.lbdb", c); }
+                catch (const IOException& e) {
+                    rejected = std::string(e.what()).find("transient rooted WAL read failure") != std::string::npos;
+                }
+            }
+            require(walReadInjected, "SETUP transient WAL read was not injected");
+            require(rejected, "transient WAL read failure silently accepted");
+            require(bytes(wal) == originalWAL, "failed replay changed WAL bytes");
+            { Database db(RootDirectory::open(f.path.string()), "strict-wal.lbdb", c); Connection conn(&db);
+              require(rows(conn) == 1, "clean WAL replay lost committed row"); }
+            f.unchanged();
+        });
+    }
     test("checkpoint rollback repeated writes and cleanup", [] {
         Fixture f;
         {

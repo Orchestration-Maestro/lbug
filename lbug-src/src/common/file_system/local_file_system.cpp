@@ -499,6 +499,11 @@ void LocalFileSystem::readFromFile(FileInfo& fileInfo, void* buffer, uint64_t nu
                 position));
         }
 #else
+#ifdef MAESTRO_NATIVE_OPEN_TEST
+        if (root && maestroRestrictedCall) {
+            maestroRestrictedCall("read", localFileInfo->fd, fileInfo.path.c_str(), nullptr);
+        }
+#endif
         auto numBytesRead =
             pread(localFileInfo->fd, outputBuffer + bufferOffset, numBytesToRead, position);
         if (numBytesRead < 0) {
