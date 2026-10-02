@@ -330,6 +330,7 @@ jobs:
           foreach ($required in @('windows_rooted_read_only_roundtrip_and_wrapper_lifetime ... ok', 'windows_writable_rooted_constructor_refuses_before_io ... ok', '2 passed; 0 failed')) {
             if (!(Select-String -Path (Join-Path $evidence 'rust-root-green.txt') -SimpleMatch $required -Quiet)) { throw "Missing mandatory Rust evidence: $required" }
           }
+          . .github/scripts/e02c-review-probes.ps1
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:

@@ -1,0 +1,81 @@
+[
+  {
+    "id": 1,
+    "testSource": "tests/native_safety/windows_root.cpp",
+    "inputOld": "            {\n                auto root = RootDirectory::open(utf8(fixture));\n                lbug::main::Database db(root, \"wal.lbdb\", config);",
+    "inputNew": "            {\n                bool injected = false, rejected = false;\n                {\n                    Hook hook([&](const char* op, void* h, void*) {\n                        if (!injected && std::string(op) == \"read\" && leaf(h, L\"wal.lbdb.wal\")) {\n                            injected = true;\n                            throw IOException(\"review transient WAL read failure\");\n                        }\n                        return 0;\n                    });\n                    try { lbug::main::Database db(RootDirectory::open(utf8(fixture)), \"wal.lbdb\", config); }\n                    catch (const IOException& e) { rejected = std::string(e.what()).find(\"review transient WAL read failure\") != std::string::npos; }\n                }\n                require(injected, \"SETUP transient WAL read was not injected\");\n                require(rejected, \"transient WAL read failure silently accepted\");\n            }\n            {\n                auto root = RootDirectory::open(utf8(fixture));\n                lbug::main::Database db(root, \"wal.lbdb\", config);",
+    "test": "active_wal_read_only_replay_has_no_mutations",
+    "assertion": "transient WAL read failure silently accepted"
+  },
+  {
+    "id": 2,
+    "testSource": "tests/native_safety/windows_root.cpp",
+    "source": "lbug-src/src/common/file_system/root_directory_windows.cpp",
+    "old": "if (standard.DeletePending || (standard.Directory != FALSE) != directory ||",
+    "new": "if ((standard.Directory != FALSE) != directory ||",
+    "inputOld": "        test(\"link_count_is_required\", [&] {",
+    "inputNew": "        test(\"delete_pending_is_required\", [&] {\n            auto root = RootDirectory::open(utf8(path));\n            Hook hook([](const char* op, void* h, void* info) {\n                if (std::string(op) == \"standard\" && leaf(h, L\"db.lbdb\"))\n                    static_cast<FILE_STANDARD_INFO*>(info)->DeletePending = TRUE;\n                return 0;\n            });\n            refuses([&] { root->probeRegularFile(\"db.lbdb\"); }, \"delete-pending file accepted\", \"delete-pending\");\n        });\n        test(\"link_count_is_required\", [&] {",
+    "test": "delete_pending_is_required",
+    "assertion": "delete-pending file accepted"
+  },
+  {
+    "id": 3,
+    "testSource": "tests/native_safety/windows_root.cpp",
+    "source": "lbug-src/src/common/file_system/root_directory_windows.cpp",
+    "old": "if (status == nameNotFound && missing) return {};",
+    "new": "if (status < 0 && missing) return {};",
+    "inputOld": "        test(\"link_count_is_required\", [&] {",
+    "inputNew": "        test(\"access_denied_is_not_absence\", [&] {\n            auto fixture = parent / \"denied-metadata\";\n            fs::create_directory(fixture); makePrivate(fixture);\n            std::ofstream(fixture / \"child\") << \"safe\";\n            auto cleanup = hold(CreateFileW((fixture / \"child\").c_str(), READ_CONTROL | WRITE_DAC,\n                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));\n            auto apply = [&](bool denied) {\n                PSECURITY_DESCRIPTOR raw = nullptr;\n                auto sddl = std::string(\"D:P\") + (denied ? \"(D;;0x80;;;\" + user() + \")\" : \"\") + \"(A;;FA;;;\" + user() + \")\";\n                require(ConvertStringSecurityDescriptorToSecurityDescriptorA(sddl.c_str(), SDDL_REVISION_1, &raw, nullptr), \"SETUP denied-metadata DACL\");\n                auto sd = std::unique_ptr<void, decltype(&LocalFree)>(raw, &LocalFree);\n                BOOL present, defaulted; PACL acl = nullptr;\n                require(GetSecurityDescriptorDacl(raw, &present, &acl, &defaulted) && present && acl, \"SETUP denied-metadata DACL decode\");\n                require(SetSecurityInfo(cleanup.get(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,\n                    nullptr, nullptr, acl, nullptr) == ERROR_SUCCESS, \"SETUP denied-metadata DACL apply\");\n            };\n            auto root = RootDirectory::open(utf8(fixture));\n            apply(true);\n            bool rejected = false;\n            try { root->probeRegularFile(\"child\"); }\n            catch (const IOException& e) { rejected = std::string(e.what()).find(\"NTSTATUS=3221225506\") != std::string::npos; }\n            apply(false); root.reset(); cleanup.reset(); fs::remove_all(fixture);\n            require(rejected, \"access-denied metadata reported absent\");\n        });\n        test(\"link_count_is_required\", [&] {",
+    "test": "access_denied_is_not_absence",
+    "assertion": "access-denied metadata reported absent"
+  },
+  {
+    "id": 4,
+    "testSource": "tests/native_safety/windows_root.cpp",
+    "source": "lbug-src/src/common/file_system/root_directory_windows.cpp",
+    "old": "requireKind(h, false); requireLeaf(h, name);",
+    "new": "requireKind(h, false); (void)name;",
+    "test": "read_modes_refuse_links_kinds_and_aliases",
+    "assertion": "unsafe read mode accepted"
+  },
+  {
+    "id": 5,
+    "testSource": "tests/native_safety/windows_root.cpp",
+    "source": "lbug-src/src/common/file_system/root_directory_windows.cpp",
+    "old": "validateRootSecurity(directories.back().get());",
+    "new": "(void)0;",
+    "test": "private_root_policy_is_wired_into_acquisition_and_reads",
+    "assertion": "unsafe root ACL accepted"
+  },
+  {
+    "id": 6,
+    "testSource": "tests/native_safety/windows_root.cpp",
+    "source": "lbug-src/src/common/file_system/root_directory_windows.cpp",
+    "old": "validateChildSecurity(h, directories.back().get());",
+    "new": "(void)0;",
+    "test": "private_root_policy_is_wired_into_acquisition_and_reads",
+    "assertion": "unsafe child ACL accepted"
+  },
+  {
+    "id": 7,
+    "testSource": "tests/native_safety/windows_root.cpp",
+    "source": "lbug-src/src/common/file_system/local_file_system.cpp",
+    "old": "if (root) throw IOException(\"Restricted writable handle I/O is unsupported on Windows.\");",
+    "new": "if (false) throw IOException(\"Restricted writable handle I/O is unsupported on Windows.\");",
+    "inputOld": "refuses([&] { file->writeFile(reinterpret_cast<const uint8_t*>(\"x\"), 1, 0); }, \"rooted write accepted\");",
+    "inputNew": "refuses([&] { file->writeFile(reinterpret_cast<const uint8_t*>(\"x\"), 1, 0); }, \"rooted write accepted\", \"Restricted writable handle I/O\");",
+    "test": "read_only_mutators_remain_closed",
+    "assertion": "rooted write accepted"
+  },
+  {
+    "id": 8,
+    "testSource": "tests/native_safety/windows_root.cpp",
+    "source": "lbug-src/src/common/file_system/local_file_system.cpp",
+    "old": "if (root) throw IOException(\"Restricted writable truncate is unsupported on Windows.\");",
+    "new": "if (false) throw IOException(\"Restricted writable truncate is unsupported on Windows.\");",
+    "inputOld": "refuses([&] { file->truncate(0); }, \"rooted truncate accepted\");",
+    "inputNew": "refuses([&] { file->truncate(0); }, \"rooted truncate accepted\", \"Restricted writable truncate\");",
+    "test": "read_only_mutators_remain_closed",
+    "assertion": "rooted truncate accepted"
+  }
+]
