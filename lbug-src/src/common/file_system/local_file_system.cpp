@@ -30,6 +30,12 @@
 
 namespace lbug {
 namespace common {
+#if defined(MAESTRO_NATIVE_OPEN_TEST) && defined(_WIN32)
+extern int (*maestroWindowsCall)(const char*, void*, void*);
+static void windowsContentPoint(const char* operation, const void* handle) {
+    if (maestroWindowsCall) maestroWindowsCall(operation, const_cast<void*>(handle), nullptr);
+}
+#endif
 #if defined(MAESTRO_NATIVE_OPEN_TEST) && !defined(_WIN32)
 extern int (*maestroRestrictedCall)(const char*, int, const char*, struct stat*);
 static void nativeFileSyncPoint(const FileInfo& fileInfo) {
@@ -120,8 +126,8 @@ std::unique_ptr<FileInfo> LocalFileSystem::openFile(const std::string& path, Fil
     }
 
 #if defined(_WIN32)
-    if (root) {
-        throw IOException("Restricted openFile is unsupported on Windows (E02).");
+    if (root && (writeMode || flags.lockType == FileLockType::WRITE_LOCK)) {
+        throw IOException("Restricted writable openFile is unsupported on Windows (read-only only).");
     }
     auto dwDesiredAccess = 0ul;
     int dwCreationDisposition;
@@ -144,12 +150,13 @@ std::unique_ptr<FileInfo> LocalFileSystem::openFile(const std::string& path, Fil
         dwDesiredAccess |= _O_BINARY;
     }
 
-    HANDLE handle = CreateFileA(fullPath.c_str(), dwDesiredAccess, dwShareMode, nullptr,
+    HANDLE handle = root ? root->openFile(path, openFlags) : CreateFileA(fullPath.c_str(), dwDesiredAccess, dwShareMode, nullptr,
         dwCreationDisposition, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (handle == INVALID_HANDLE_VALUE) {
         throw IOException(std::format("Cannot open file. path: {} - Error {}: {}", fullPath,
             GetLastError(), std::system_category().message(GetLastError())));
     }
+    auto owned = std::unique_ptr<void, decltype(&CloseHandle)>(handle, &CloseHandle);
     if (flags.lockType != FileLockType::NO_LOCK) {
         DWORD dwFlags = flags.lockType == FileLockType::READ_LOCK ?
                             LOCKFILE_FAIL_IMMEDIATELY :
@@ -159,7 +166,6 @@ std::unique_ptr<FileInfo> LocalFileSystem::openFile(const std::string& path, Fil
         BOOL rc = LockFileEx(handle, dwFlags, 0 /*reserved*/, 1 /*numBytesLow*/, 0 /*numBytesHigh*/,
             &overlapped);
         if (!rc) {
-            CloseHandle(handle);
             auto error = GetLastError();
             throw IOException("Could not set lock on file : " + fullPath +
                               " (Error: " + std::to_string(error) + ")\n" +
@@ -167,7 +173,9 @@ std::unique_ptr<FileInfo> LocalFileSystem::openFile(const std::string& path, Fil
                               "information.");
         }
     }
-    return std::make_unique<LocalFileInfo>(fullPath, handle, this);
+    auto result = std::make_unique<LocalFileInfo>(fullPath, handle, this);
+    owned.release();
+    return result;
 #else
     int fd = root ? root->openFile(path, openFlags) : open(fullPath.c_str(), openFlags, 0644);
     if (fd == -1) {
@@ -468,10 +476,13 @@ void LocalFileSystem::readFromFile(FileInfo& fileInfo, void* buffer, uint64_t nu
     while (remainingNumBytesToRead > 0) {
         const auto numBytesToRead = (std::min)(remainingNumBytesToRead, maxBytesToReadAtOnce);
 #if defined(_WIN32)
-        DWORD numBytesRead;
+        DWORD numBytesRead = 0;
         OVERLAPPED overlapped = {};
         overlapped.Offset = position & 0xffffffff;
         overlapped.OffsetHigh = position >> 32;
+#ifdef MAESTRO_NATIVE_OPEN_TEST
+        windowsContentPoint("read", localFileInfo->handle);
+#endif
         if (!ReadFile((HANDLE)localFileInfo->handle, outputBuffer + bufferOffset, numBytesToRead,
                 &numBytesRead, &overlapped)) {
             auto error = GetLastError();
@@ -518,8 +529,15 @@ void LocalFileSystem::readFromFile(FileInfo& fileInfo, void* buffer, uint64_t nu
 int64_t LocalFileSystem::readFile(FileInfo& fileInfo, void* buf, size_t nbyte) const {
     auto localFileInfo = fileInfo.constPtrCast<LocalFileInfo>();
 #if defined(_WIN32)
-    DWORD numBytesRead;
-    ReadFile((HANDLE)localFileInfo->handle, buf, nbyte, &numBytesRead, nullptr);
+    DWORD numBytesRead = 0;
+#ifdef MAESTRO_NATIVE_OPEN_TEST
+    windowsContentPoint("read", localFileInfo->handle);
+#endif
+    const auto bytes = static_cast<DWORD>((std::min)(nbyte, size_t{1} << 30));
+    if (!ReadFile((HANDLE)localFileInfo->handle, buf, bytes, &numBytesRead, nullptr)) {
+        const auto error = GetLastError();
+        throw IOException("Cannot read file: " + fileInfo.path + " Error: " + std::to_string(error));
+    }
     return numBytesRead;
 #else
     return read(localFileInfo->fd, buf, nbyte);
@@ -528,6 +546,9 @@ int64_t LocalFileSystem::readFile(FileInfo& fileInfo, void* buf, size_t nbyte) c
 
 void LocalFileSystem::writeFile(FileInfo& fileInfo, const uint8_t* buffer, uint64_t numBytes,
     uint64_t offset) const {
+#ifdef _WIN32
+    if (root) throw IOException("Restricted writable handle I/O is unsupported on Windows.");
+#endif
     auto localFileInfo = fileInfo.constPtrCast<LocalFileInfo>();
     uint64_t remainingNumBytesToWrite = numBytes;
     uint64_t bufferOffset = 0;
@@ -620,10 +641,16 @@ void LocalFileSystem::syncFile(const FileInfo& fileInfo) const {
 int64_t LocalFileSystem::seek(FileInfo& fileInfo, uint64_t offset, int whence) const {
     auto localFileInfo = fileInfo.constPtrCast<LocalFileInfo>();
 #if defined(_WIN32)
-    LARGE_INTEGER result;
-    LARGE_INTEGER offset_;
+    LARGE_INTEGER result{};
+    LARGE_INTEGER offset_{};
     offset_.QuadPart = offset;
-    SetFilePointerEx((HANDLE)localFileInfo->handle, offset_, &result, whence);
+#ifdef MAESTRO_NATIVE_OPEN_TEST
+    windowsContentPoint("seek", localFileInfo->handle);
+#endif
+    if (!SetFilePointerEx((HANDLE)localFileInfo->handle, offset_, &result, whence)) {
+        const auto error = GetLastError();
+        throw IOException("Cannot set file pointer: " + fileInfo.path + " Error: " + std::to_string(error));
+    }
     return result.QuadPart;
 #else
     return lseek(localFileInfo->fd, offset, whence);
@@ -631,6 +658,9 @@ int64_t LocalFileSystem::seek(FileInfo& fileInfo, uint64_t offset, int whence) c
 }
 
 void LocalFileSystem::truncate(FileInfo& fileInfo, uint64_t size) const {
+#ifdef _WIN32
+    if (root) throw IOException("Restricted writable truncate is unsupported on Windows.");
+#endif
     auto localFileInfo = fileInfo.constPtrCast<LocalFileInfo>();
 #if defined(_WIN32)
     auto offsetHigh = (LONG)(size >> 32);

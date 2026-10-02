@@ -18,6 +18,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Activate the built-in Visual Studio DeveloperShell
         shell: pwsh
         run: |
@@ -196,7 +197,7 @@ jobs:
             $cases = @($suite.testcase | Where-Object name -eq $test)
             if ($cases.Count -ne 1 -or $cases[0].status -ne 'run' -or $cases[0].failure -or $cases[0].error) { throw "Missing successful CTest case $test" }
           }
-          foreach ($required in @('PASS shared_vectors cases=190', 'PASS windows_security groups=5')) {
+          foreach ($required in @('PASS shared_vectors cases=190', 'PASS windows_security groups=6')) {
             if (!(Select-String -Path (Join-Path $evidence 'restored-green-ctest.txt') -SimpleMatch $required -Quiet)) { throw "Missing restored security evidence: $required" }
           }
       - name: Keep SHA-bound probe, token, API and mutant evidence
@@ -219,3 +220,130 @@ jobs:
             "Temporary account and profile removed: $env:PROBE_USER"
           }
           if ($env:PROBE_ROOT -and (Test-Path $env:PROBE_ROOT)) { Remove-Item -Recurse -Force $env:PROBE_ROOT }
+
+  rooted-read-only:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: 3
+      CARGO_BUILD_JOBS: 3
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Activate Visual Studio
+        shell: pwsh
+        run: |
+          $before = @{}
+          Get-ChildItem Env: | ForEach-Object { $before[$_.Name] = $_.Value }
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          $install = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          Import-Module (Join-Path $install 'Common7/Tools/Microsoft.VisualStudio.DevShell.dll')
+          Enter-VsDevShell -VsInstallPath $install -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
+          Get-ChildItem Env: | Where-Object { $before[$_.Name] -ne $_.Value } | ForEach-Object { "$($_.Name)=$($_.Value)" >> $env:GITHUB_ENV }
+      - name: Build the real rooted engine
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force target/windows-root-evidence | Out-Null
+          $present = [bool](& git config --local --name-only --get-regexp '^http\..*\.extraheader$')
+          if ($LASTEXITCODE -gt 1 -or $present) { throw 'Checkout credentials retained or unreadable' }
+          "extraheader_present=$present" | Set-Content target/windows-root-evidence/checkout-credentials.txt
+          $passwordCheck = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes('$present = [bool]$env:PROBE_PASSWORD; "password_present=$present"; if ($present) { exit 1 }'))
+          & pwsh -NoProfile -EncodedCommand $passwordCheck | Tee-Object target/windows-root-evidence/build-credentials.txt
+          if ($LASTEXITCODE -ne 0) { throw 'Build inherited an account password' }
+          cmake -S tests/native_safety -B target/native-safety -DCMAKE_BUILD_TYPE=Release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build target/native-safety --config Release --target maestro_windows_root --parallel 3
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:LBUG_LIBRARY_DIR = "$pwd/target/native-safety/src/Release"
+          $env:LBUG_INCLUDE_DIR = "$pwd/lbug-src/src/include"
+          $env:CXXFLAGS = "/DLBUG_BUNDLED /I$pwd/target/native-safety/engine/src/include"
+          if (!(Test-Path "$env:LBUG_LIBRARY_DIR/lbug.lib")) { throw 'Rebuilt Windows archive missing' }
+          $output = cargo test --release --locked --no-default-features --no-run --message-format json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $artifacts = @($output | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.reason -eq 'compiler-artifact' -and $_.profile.test -and $_.executable -and $_.target.name -eq 'lbug' })
+          if ($artifacts.Count -ne 1) { throw 'Expected exactly one rebuilt Rust unit-test executable' }
+          Copy-Item $artifacts[0].executable target/windows-root-evidence/lbug-rust-tests.exe
+          git rev-parse HEAD | Set-Content target/windows-root-evidence/tested-sha.txt
+      - name: Run rooted read-only tests as a standard user
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = "C:\Users\Public\MaestroE02c-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          "ROOT_SCRATCH=$root" >> $env:GITHUB_ENV
+          New-Item -ItemType Directory -Force $root, target/windows-root-evidence | Out-Null
+          $name = 'e02c' + [guid]::NewGuid().ToString('N').Substring(0, 15)
+          $password = [Security.SecureString]::new()
+          ('Aa1!' + [Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(32))).ToCharArray() | ForEach-Object { $password.AppendChar($_) }
+          $password.MakeReadOnly()
+          "ROOT_USER=$name" >> $env:GITHUB_ENV
+          $user = New-LocalUser -Name $name -Password $password
+          "ROOT_SID=$($user.SID.Value)" >> $env:GITHUB_ENV
+          Add-LocalGroupMember -Group (Get-LocalGroup -SID 'S-1-5-32-545') -Member $user
+          icacls $root /grant "*$($user.SID.Value):(OI)(CI)F" '*S-1-5-32-545:(OI)(CI)RX'
+          if ($LASTEXITCODE -ne 0) { throw 'Scratch grant failed' }
+          $credential = [pscredential]::new("$env:COMPUTERNAME\$name", $password)
+          $exe = Join-Path $root 'maestro_windows_root.exe'
+          Copy-Item target/native-safety/Release/maestro_windows_root.exe $exe
+          # Enable mandatory alias/symlink fixture creation on the disposable runner.
+          fsutil 8dot3name set C: 0
+          if ($LASTEXITCODE -ne 0) { throw 'Mandatory 8.3 fixture setup failed' }
+          # Developer-mode symlinks are mandatory fixtures, not a privilege skip.
+          New-Item -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock' -Force | Out-Null
+          Set-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock' -Name AllowDevelopmentWithoutDevLicense -Type DWord -Value 1
+          $evidence = Join-Path $pwd 'target/windows-root-evidence'
+          # Credential children inherit the runner environment, not its accessible temp directory.
+          $env:TEMP = $root
+          $env:TMP = $root
+          function Run-RootChild($program, $arguments, $label) {
+            $stdout = Join-Path $root "$label.stdout.txt"
+            $stderr = Join-Path $root "$label.stderr.txt"
+            $parameters = @{
+              FilePath = $program; WorkingDirectory = $root; Credential = $credential
+              LoadUserProfile = $true; Wait = $true; PassThru = $true
+              RedirectStandardOutput = $stdout; RedirectStandardError = $stderr
+            }
+            if ($arguments.Count -gt 0) { $parameters.ArgumentList = $arguments }
+            $child = Start-Process @parameters
+            Get-Content $stdout, $stderr | Tee-Object (Join-Path $evidence "$label.txt") | Out-Host
+            "command=$program $arguments exit=$($child.ExitCode)" | Set-Content (Join-Path $evidence "$label.exit.txt")
+            return $child.ExitCode
+          }
+          $passwordCheck = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes('$present = [bool]$env:PROBE_PASSWORD; "password_present=$present"; if ($present) { exit 1 }'))
+          $credentials = Run-RootChild (Get-Command pwsh).Source @('-NoProfile', '-EncodedCommand', $passwordCheck) 'standard-child-credentials'
+          if ($credentials[-1] -ne 0) { throw 'Standard user inherited an account password' }
+          ('add_test(maestro_windows_root "' + $exe.Replace('\', '/') + '" "' + $root.Replace('\', '/') + '")') | Set-Content (Join-Path $root 'CTestTestfile.cmake')
+          $ctest = Run-RootChild (Get-Command ctest).Source @('--test-dir', $root, '-R', '^maestro_windows_root$', '--verbose', '--timeout', '120', '--output-on-failure', '--output-junit', (Join-Path $root 'root.xml')) 'root-green'
+          Copy-Item (Join-Path $root 'root.xml') $evidence
+          if ($ctest[-1] -ne 0) { throw 'Root suite failed' }
+          [xml]$results = Get-Content -Raw (Join-Path $root 'root.xml')
+          if ($results.testsuite.tests -ne '1' -or $results.testsuite.failures -ne '0' -or $results.testsuite.skipped -ne '0') { throw 'Root CTest count/failure/skip mismatch' }
+          foreach ($required in @('PASS rooted_read_only_roundtrip', 'PASS verified_non_admin_token', 'windows_root groups=21 failures=0')) {
+            if (!(Select-String -Path (Join-Path $evidence 'root-green.txt') -SimpleMatch $required -Quiet)) { throw "Missing mandatory root evidence: $required" }
+          }
+          $rustExe = Join-Path $root 'lbug-rust-tests.exe'
+          Copy-Item (Join-Path $evidence 'lbug-rust-tests.exe') $rustExe
+          Remove-Item (Join-Path $evidence 'lbug-rust-tests.exe')
+          $rust = Run-RootChild $rustExe @('native_safety_tests', '--nocapture', '--test-threads=3') 'rust-root-green'
+          if ($rust[-1] -ne 0) { throw 'Standard-user Rust rooted tests failed' }
+          foreach ($required in @('windows_rooted_read_only_roundtrip_and_wrapper_lifetime ... ok', 'windows_writable_rooted_constructor_refuses_before_io ... ok', '2 passed; 0 failed')) {
+            if (!(Select-String -Path (Join-Path $evidence 'rust-root-green.txt') -SimpleMatch $required -Quiet)) { throw "Missing mandatory Rust evidence: $required" }
+          }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: windows-root-${{ github.sha }}
+          path: target/windows-root-evidence
+          if-no-files-found: error
+      - name: Remove temporary account
+        if: always()
+        shell: pwsh
+        run: |
+          if ($env:ROOT_USER) {
+            Remove-LocalUser -Name $env:ROOT_USER -ErrorAction Stop
+            Get-CimInstance Win32_UserProfile | Where-Object SID -eq $env:ROOT_SID | Remove-CimInstance -ErrorAction Stop
+            if (Get-LocalUser -Name $env:ROOT_USER -ErrorAction SilentlyContinue) { throw 'Temporary account remains' }
+            if (Get-CimInstance Win32_UserProfile | Where-Object SID -eq $env:ROOT_SID) { throw 'Temporary profile remains' }
+          }
+          if ($env:ROOT_SCRATCH -and (Test-Path $env:ROOT_SCRATCH)) { Remove-Item -Recurse -Force $env:ROOT_SCRATCH }

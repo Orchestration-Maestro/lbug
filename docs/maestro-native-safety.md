@@ -1,4 +1,4 @@
-# Restricted projection filesystem: E01a / E01b / E01c / E02a
+# Restricted projection filesystem: E01a / E01b / E01c / E02a / E02b / E02c
 
 These are native safety slices, **not a qualified engine isolation boundary yet**.
 Maestro must not adopt restricted mode until every E01 slice and E02 have landed and the
@@ -18,7 +18,7 @@ with neither group nor other write permission (`(st_mode & (S_IWGRP | S_IWOTH)) 
 `RootDirectory::open` throws `IOException` naming this rule before any child is opened,
 created or probed. Modes 0700 and 0755 are accepted. Ancestors above the root retain only
 the held-identity rules; they need not be private. Unrooted opens are unchanged, and
-Windows remains unsupported and fail-closed.
+native Windows supports read-only rooted construction as described below.
 Callers create the root themselves with mode 0700 and never rely on the umask.
 
 After open, replacement of any held ancestor above or at the root is detected by identity
@@ -53,7 +53,36 @@ bypassing the ownership boundary are unsupported.
 | Copy/overwrite, createDir, glob, expandPath | Native E01a refusals retained, no ambient fallback; E01c refuses file queries before these primitives | COPY/import/export, extension install/load, file-scan binding |
 | Alternative VFS registration/dispatch | Native registration refused; E01c refuses file-scan sources before glob, existence checks or function dispatch | Only local rooted handles supported |
 | External query features | E01c typed structural bind-time refusals; contextual runtime/recovery helpers share the same table | Extension install/load/uninstall, COPY FROM/TO, import/export, ATTACH/DETACH, CSV/NPY/Parquet scans and external Parquet storage |
-| Windows capability / restricted construction | Unsupported, fails closed before database I/O | E02 |
+| Windows capability / restricted construction | Private local NTFS roots held by non-delete-shared ancestor handles; metadata and read-only handles opened relative to the held root; writable construction refuses before database I/O | E02c; writable support remains closed |
+
+### Native Windows read-only boundary (E02c)
+
+Windows resolves the caller's existing absolute root once, with strict UTF-8 conversion,
+then walks the normalized volume-GUID path with held, non-inheritable directory handles.
+Every held ancestor excludes `FILE_SHARE_DELETE`. Before and after child access, those
+handles and directory-relative reopenings must retain their volume serial and 128-bit file
+IDs. Only fixed local NTFS volumes with the required SDK metadata semantics are supported.
+Trusted initial junctions, Unicode names and long roots are accepted; missing roots are never created.
+
+Acquisition and every rooted child access validate `maestro-private-root/1` through held
+handles. `NtCreateFile(FILE_OPEN)` opens one counted UTF-16 child relative to its held parent,
+with `FILE_OPEN_REPARSE_POINT`; kind, reparse attributes, delete-pending state, single link,
+normalized long spelling, volume and observed identity are checked before content access.
+ADS, invalid UTF-8, DOS devices, separators, controls, wildcards, trailing dot/space and
+case/short-name aliases refuse. Only an unremembered object-name-not-found is absence.
+
+`new_rooted` supports clean read-only databases and active-WAL read replay, without adoption,
+spill creation, mutation or namespace barriers. Rooted Windows opens force strict WAL replay:
+any WAL replay failure propagates to the constructor caller rather than skipping records. Windows writable rooted constructors refuse
+before startup probing; low-level writes, truncation, adoption, rename, removal, generated
+temps and directory/file sync remain closed. No directory-sync no-op is used. Unix behavior
+is unchanged. Read/seek/size errors propagate rather than returning fabricated success.
+This remains an intermediate fork slice, not deployment or engine-isolation qualification.
+
+The focused Windows workflow runs mandatory root and Rust reader cases as a verified
+standard user. The full native workflow runs the remaining native/Rust cases; it excludes
+only that separately executed standard-user CTest case. E02c hand mutants live exclusively
+on a disposable `test/` branch, never in the delivered production history.
 
 ### Companion ownership and publication
 
@@ -143,7 +172,7 @@ in the E01c report. This scan does not qualify deferred rows.
   direct NPY mapping and remaining external file-scan routes. Static
   `LocalFileSystem::fileExists` remains unrestricted for unrooted binding, but rooted file
   sources refuse before it. No native copy/overwrite or directory-creation primitive was enabled.
-- Windows safety and `build.rs` are unchanged; the full E01/E02/E07 qualification remains required.
+- E01c itself does not change Windows safety or `build.rs`; full E01/E02/E07 qualification remains required.
 
 ### Query refusal policy
 
@@ -167,7 +196,7 @@ persisted extension or external-table reconstruction.
 
 ## E02a Windows namespace-barrier feasibility
 
-**Verdict: NO. Production rooted Windows remains fail-closed.** This diagnostic slice
+**Verdict: NO. Writable rooted Windows remains closed; E02c enables read-only access.** This diagnostic slice
 neither links the engine nor enables any rooted operation. An API returning success is
 not a documented parent-directory power-loss ordering guarantee.
 
@@ -231,7 +260,8 @@ ambient open/probe/mapping/load calls. Persisted external-table startup allows r
 header reads but no external probe/open. Unrooted controls exercise real COPY/import/export,
 load/uninstall, attach/detach, reader binding and external-table creation/scanning; extension
 install prepares without execution because the harness disables its network installer.
-Windows still refuses capability acquisition, before a rooted query context can exist.
+Windows additionally executes the mandatory E02c read-only root suite in the focused
+standard-user job; the full Windows query-refusal matrix remains E02g qualification work.
 Outside sentinel bytes and identity are checked. Tests exercise ancestor swaps, links,
 existing destinations, aliases, unrelated stems, directories, replaced/disappeared identities,
 atomic destination races, syscall/durability failures and generated-temp collisions/cleanup.
@@ -261,13 +291,13 @@ recovery, rollback, checkpoint and read-only reopen using the same source-built 
 On Linux, `maestro_rooted_sidecars` uses `-Wl,--wrap=fsync` to observe the actual directory-sync
 call, verify its descriptor's dev/ino, return EIO there (the pre-call hook succeeds), and prove
 permanent refusal including an already-held WAL handle. The three-OS workflow runs the native
-and Rust suites; Windows still proves refusal.
+and Rust suites; Windows proves read-only success and writable-before-I/O refusal.
 
 ## Windows owner/DACL boundary (E02b)
 
 `maestro-private-root/1` is an integrity predicate, not a grant of access or a
-Windows rooted-open implementation. E02b does not change any open path: writable
-and read-only rooted Windows construction remain closed until their own slices.
+Windows rooted-open implementation by itself. E02c wires these validators into read-only
+acquisition and child access; writable Windows construction remains closed.
 The private native validators query held handles without modifying permissions.
 They require the process primary TokenUser owner, reject thread impersonation and
 all security/token/control/ACE-query failures, require a present non-null DACL,
@@ -298,10 +328,11 @@ The latter check protected-root inheritance against a changed broad parent,
 unsafe writes, unreadable handles, root protection and real impersonation, with
 outside bytes/file ID/volume/link and directory-listing invariants.
 
-The focused Windows workflow runs all five security groups and four isolated
+The focused Windows workflow runs all six security groups (including real token sizing
+with `ERROR_BAD_LENGTH`) and four isolated
 owner/null-DACL/writable-ACE/query-failure mutants, rebuilds after each restore,
 and executes both probe and security CTest entries as its verified standard-user
-child. The six full-engine/source-default jobs remain unchanged; they compile
-this boundary on Windows but do not run live ACL fixtures as an administrator.
-E02c owns capability ancestry/no-follow integration. E02a's namespace-durability
+child. The full-engine/source-default jobs also exercise C++ and Rust constructors; the
+focused job is authoritative for standard-user ACL/root fixtures.
+E02c implements capability ancestry/no-follow integration. E02a's namespace-durability
 verdict remains NO; this boundary does not authorize writable Windows support.

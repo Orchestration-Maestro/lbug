@@ -9,8 +9,9 @@ use std::{fmt, path::Path};
 /// Below this root, only plain child names and single-link regular files are accepted.
 /// Replaced ancestors, links below the root and invalid names fail closed.
 ///
-/// Windows currently refuses this capability. This partial mode must not be adopted
-/// until all native safety slices and both platforms are qualified.
+/// Native Windows supports read-only rooted databases on private local NTFS roots;
+/// writable rooted construction remains refused before database I/O. This partial mode
+/// must not be adopted until all native safety slices and host platforms are qualified.
 pub struct RootDirectory {
     pub(crate) root: cxx::SharedPtr<ffi::RootDirectory>,
 }

@@ -1,5 +1,4 @@
 use crate::RootDirectory;
-#[cfg(unix)]
 use crate::{Connection, Database, SystemConfig, Value};
 
 #[cfg(unix)]
@@ -313,13 +312,122 @@ fn rooted_constructor_refuses_replaced_ancestor() -> anyhow::Result<()> {
 }
 
 #[cfg(windows)]
-#[test]
-fn restricted_mode_fails_closed_on_windows() -> anyhow::Result<()> {
+fn windows_private_fixture() -> anyhow::Result<tempfile::TempDir> {
     let directory = tempfile::tempdir()?;
+    // Fixture setup only. The engine validates, and never repairs, permissions.
+    let script = r"
+$ErrorActionPreference = 'Stop'
+$path = $env:MAESTRO_TEST_PRIVATE_ROOT
+$user = [Security.Principal.WindowsIdentity]::GetCurrent().User
+$acl = [Security.AccessControl.DirectorySecurity]::new()
+$acl.SetOwner($user)
+$acl.SetAccessRuleProtection($true, $false)
+foreach ($sid in @($user.Value, 'S-1-5-18', 'S-1-5-32-544')) {
+    $rule = [Security.AccessControl.FileSystemAccessRule]::new(
+        [Security.Principal.SecurityIdentifier]::new($sid), 'FullControl',
+        'ContainerInherit,ObjectInherit', 'None', 'Allow')
+    $acl.AddAccessRule($rule)
+}
+Set-Acl -LiteralPath $path -AclObject $acl
+if ((Get-Acl -LiteralPath $path).GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $user.Value) {
+    throw 'SETUP root owner does not equal primary TokenUser'
+}
+";
+    let status = std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        // Windows PowerShell 5.1 under pwsh inherits PowerShell 7's incompatible module path.
+        .env_remove("PSModulePath")
+        .env("MAESTRO_TEST_PRIVATE_ROOT", directory.path())
+        .status()?;
+    anyhow::ensure!(status.success(), "Windows private-root fixture ACL failed");
+    Ok(directory)
+}
+
+#[cfg(windows)]
+fn windows_set_fixture_file_owner(path: &std::path::Path) -> anyhow::Result<()> {
+    // Get-Acl starts with unmodified sections; SetOwner marks only the owner section for Set-Acl.
+    let script = r"
+$ErrorActionPreference = 'Stop'
+$path = $env:MAESTRO_TEST_PRIVATE_FILE
+$user = [Security.Principal.WindowsIdentity]::GetCurrent().User
+$acl = Get-Acl -LiteralPath $path
+$before = $acl.GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::Access)
+$acl.SetOwner($user)
+Set-Acl -LiteralPath $path -AclObject $acl
+$actual = Get-Acl -LiteralPath $path
+if ($actual.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $user.Value) {
+    throw 'SETUP reader file owner does not equal primary TokenUser'
+}
+if ($actual.GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::Access) -ne $before) {
+    throw 'SETUP owner-only change modified the DACL'
+}
+";
+    let status = std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        // Windows PowerShell 5.1 under pwsh inherits PowerShell 7's incompatible module path.
+        .env_remove("PSModulePath")
+        .env("MAESTRO_TEST_PRIVATE_FILE", path)
+        .status()?;
+    anyhow::ensure!(status.success(), "Windows reader owner fixture failed");
+    Ok(())
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_rooted_read_only_roundtrip_and_wrapper_lifetime() -> anyhow::Result<()> {
+    let directory = windows_private_fixture()?;
+    let config = SystemConfig::default()
+        .buffer_pool_size(16 * 1024 * 1024)
+        .max_db_size(64 * 1024 * 1024)
+        .max_num_threads(1)
+        .auto_checkpoint(false);
+    {
+        let db = Database::new(directory.path().join("db.lbdb"), config.clone())?;
+        let connection = Connection::new(&db)?;
+        connection.query("CREATE NODE TABLE Item(id INT64, PRIMARY KEY(id))")?;
+        connection.query("CREATE (:Item {id: 7})")?;
+        connection.query("CHECKPOINT")?;
+    }
+    for entry in std::fs::read_dir(directory.path())? {
+        windows_set_fixture_file_owner(&entry?.path())?;
+    }
+    let listing = || -> anyhow::Result<std::collections::BTreeSet<std::ffi::OsString>> {
+        Ok(std::fs::read_dir(directory.path())?
+            .map(|entry| entry.map(|entry| entry.file_name()))
+            .collect::<std::io::Result<_>>()?)
+    };
+    let before = listing()?;
+    let db = {
+        let root = RootDirectory::open(directory.path())?;
+        Database::new_rooted(&root, "db.lbdb", config.read_only(true))?
+    };
+    let connection = Connection::new(&db)?;
+    assert_eq!(
+        connection
+            .query("MATCH (i:Item) RETURN i.id")?
+            .next()
+            .unwrap()[0],
+        Value::Int64(7)
+    );
+    drop(connection);
+    drop(db);
+    assert_eq!(before, listing()?);
+    Ok(())
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_writable_rooted_constructor_refuses_before_io() -> anyhow::Result<()> {
+    let directory = windows_private_fixture()?;
     let sentinel = directory.path().join("sentinel");
     std::fs::write(&sentinel, b"outside sentinel")?;
-    let error = RootDirectory::open(directory.path()).expect_err("Windows must refuse");
-    assert!(error.to_string().contains("unsupported"));
+    let root = RootDirectory::open(directory.path())?;
+    let Err(error) = Database::new_rooted(&root, "missing.lbdb", SystemConfig::default()) else {
+        panic!("writable Windows rooted construction accepted");
+    };
+    assert!(error.to_string().contains("writable database construction"));
+    assert!(!directory.path().join("missing.lbdb").exists());
     assert_eq!(std::fs::read(sentinel)?, b"outside sentinel");
+    assert_eq!(std::fs::read_dir(directory.path())?.count(), 1);
     Ok(())
 }
