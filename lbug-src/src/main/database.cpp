@@ -107,6 +107,7 @@ Database::Database(std::shared_ptr<RootDirectory> root, std::string_view name,
     if (!systemConfig.readOnly) {
         throw IOException("Restricted writable database construction is unsupported on Windows (read-only only).");
     }
+    dbConfig->throwOnWalReplayFailure = true;
 #endif
     initMembers(name, initBufferManager);
 }

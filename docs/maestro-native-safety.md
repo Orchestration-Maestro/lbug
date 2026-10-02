@@ -72,7 +72,8 @@ ADS, invalid UTF-8, DOS devices, separators, controls, wildcards, trailing dot/s
 case/short-name aliases refuse. Only an unremembered object-name-not-found is absence.
 
 `new_rooted` supports clean read-only databases and active-WAL read replay, without adoption,
-spill creation, mutation or namespace barriers. Windows writable rooted constructors refuse
+spill creation, mutation or namespace barriers. Rooted Windows opens force strict WAL replay:
+any WAL replay failure propagates to the constructor caller rather than skipping records. Windows writable rooted constructors refuse
 before startup probing; low-level writes, truncation, adoption, rename, removal, generated
 temps and directory/file sync remain closed. No directory-sync no-op is used. Unix behavior
 is unchanged. Read/seek/size errors propagate rather than returning fabricated success.

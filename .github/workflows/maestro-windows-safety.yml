@@ -319,7 +319,7 @@ jobs:
           if ($ctest[-1] -ne 0) { throw 'Root suite failed' }
           [xml]$results = Get-Content -Raw (Join-Path $root 'root.xml')
           if ($results.testsuite.tests -ne '1' -or $results.testsuite.failures -ne '0' -or $results.testsuite.skipped -ne '0') { throw 'Root CTest count/failure/skip mismatch' }
-          foreach ($required in @('PASS rooted_read_only_roundtrip', 'PASS verified_non_admin_token', 'windows_root groups=19 failures=0')) {
+          foreach ($required in @('PASS rooted_read_only_roundtrip', 'PASS verified_non_admin_token', 'windows_root groups=21 failures=0')) {
             if (!(Select-String -Path (Join-Path $evidence 'root-green.txt') -SimpleMatch $required -Quiet)) { throw "Missing mandatory root evidence: $required" }
           }
           $rustExe = Join-Path $root 'lbug-rust-tests.exe'

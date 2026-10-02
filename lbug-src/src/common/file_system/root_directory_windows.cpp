@@ -121,9 +121,12 @@ Handle relative(HANDLE parent, const std::wstring& name, bool directory, bool da
     IO_STATUS_BLOCK io{};
     HANDLE raw = nullptr;
     point("native-open", parent, &options);
-    const auto status = create(&raw, access, &attributes, &io, nullptr, FILE_ATTRIBUTE_NORMAL,
+    auto status = create(&raw, access, &attributes, &io, nullptr, FILE_ATTRIBUTE_NORMAL,
         sharing, FILE_OPEN, options, nullptr, 0);
     Handle result(raw);
+#ifdef MAESTRO_NATIVE_OPEN_TEST
+    point("native-open-status", raw, &status);
+#endif
     constexpr auto nameNotFound = static_cast<NTSTATUS>(0xC0000034UL);
     if (status == nameNotFound && missing) return {};
     if (status < 0 || io.Status < 0 || !raw || raw == INVALID_HANDLE_VALUE)
