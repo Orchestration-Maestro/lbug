@@ -204,7 +204,8 @@ int main(int argc, char** argv) {
                 NativeHook hook(failWALReadOnce);
                 try { Database db(root, "strict-wal.lbdb", c); }
                 catch (const IOException& e) {
-                    rejected = std::string(e.what()).find("transient rooted WAL read failure") != std::string::npos;
+                    rejected = std::string(e.what()).find("transient rooted WAL read failure") !=
+                        std::string::npos;
                 }
             }
             require(walReadInjected, "SETUP transient WAL read was not injected");

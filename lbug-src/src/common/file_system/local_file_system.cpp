@@ -501,6 +501,7 @@ void LocalFileSystem::readFromFile(FileInfo& fileInfo, void* buffer, uint64_t nu
 #else
 #ifdef MAESTRO_NATIVE_OPEN_TEST
         if (root && maestroRestrictedCall) {
+            // Fault injection leaves the validated descriptor unchanged.
             maestroRestrictedCall("read", localFileInfo->fd, fileInfo.path.c_str(), nullptr);
         }
 #endif

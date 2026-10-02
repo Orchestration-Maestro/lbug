@@ -11,7 +11,7 @@ on:
 permissions:
   contents: read
 env:
-  E01E_PHASE: ${{ inputs.phase || 'red' }}
+  E01E_PHASE: ${{ inputs.phase || 'green-mutant' }}
 jobs:
   proof:
     strategy:
@@ -24,6 +24,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Build rooted constructor regression
         shell: bash
         run: |
@@ -35,9 +36,11 @@ jobs:
       - name: Record red or green
         shell: bash
         run: |
+          set +e
           set -uo pipefail
           target/native-safety/maestro_rooted_flows 'strict rooted' 2>&1 | tee evidence/regression.txt
           result=${PIPESTATUS[0]}
+          set -e
           echo "$result" | tee evidence/regression.exit.txt
           if [ "$E01E_PHASE" = red ]; then
             test "$result" = 1 && grep -q 'cases: 2 failures: 2' evidence/regression.txt &&
@@ -46,7 +49,7 @@ jobs:
             test "$result" = 0 && grep -q 'cases: 2 failures: 0' evidence/regression.txt
           fi
       - name: Kill Unix lenient replay mutant and restore
-        if: (inputs.phase || 'red') == 'green-mutant'
+        if: (inputs.phase || 'green-mutant') == 'green-mutant'
         shell: bash
         run: |
           set -euo pipefail
