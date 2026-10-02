@@ -313,6 +313,7 @@ jobs:
           $passwordCheck = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes('$present = [bool]$env:PROBE_PASSWORD; "password_present=$present"; if ($present) { exit 1 }'))
           $credentials = Run-RootChild (Get-Command pwsh).Source @('-NoProfile', '-EncodedCommand', $passwordCheck) 'standard-child-credentials'
           if ($credentials[-1] -ne 0) { throw 'Standard user inherited an account password' }
+          . .github/scripts/e02c-fix-mutants.ps1
           ('add_test(maestro_windows_root "' + $exe.Replace('\', '/') + '" "' + $root.Replace('\', '/') + '")') | Set-Content (Join-Path $root 'CTestTestfile.cmake')
           $ctest = Run-RootChild (Get-Command ctest).Source @('--test-dir', $root, '-R', '^maestro_windows_root$', '--verbose', '--timeout', '120', '--output-on-failure', '--output-junit', (Join-Path $root 'root.xml')) 'root-green'
           Copy-Item (Join-Path $root 'root.xml') $evidence
