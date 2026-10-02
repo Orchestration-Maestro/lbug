@@ -73,10 +73,12 @@ case/short-name aliases refuse. Only an unremembered object-name-not-found is ab
 
 `new_rooted` supports clean read-only databases and active-WAL read replay, without adoption,
 spill creation, mutation or namespace barriers. Rooted Windows opens force strict WAL replay:
-any WAL replay failure propagates to the constructor caller rather than skipping records. Windows writable rooted constructors refuse
-before startup probing; low-level writes, truncation, adoption, rename, removal, generated
-temps and directory/file sync remain closed. No directory-sync no-op is used. Unix behavior
-is unchanged. Read/seek/size errors propagate rather than returning fabricated success.
+any WAL replay failure propagates to the constructor caller rather than skipping records.
+Rooted Unix opens, both read-only and writable, also force strict WAL replay, regardless of
+caller configuration. Unrooted opens retain their configured WAL replay behavior.
+Windows writable rooted constructors refuse before startup probing; low-level writes,
+truncation, adoption, rename, removal, generated temps and directory/file sync remain closed.
+No directory-sync no-op is used. Read/seek/size errors propagate rather than returning fabricated success.
 This remains an intermediate fork slice, not deployment or engine-isolation qualification.
 
 The focused Windows workflow runs mandatory root and Rust reader cases as a verified
