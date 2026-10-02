@@ -336,6 +336,8 @@ jobs:
           $dbSource = 'lbug-src/src/main/database.cpp'
           $nativeExe = Join-Path $root 'maestro_native_safety.exe'
           function Build-RootMutation {
+            # MSVC incrementally retains bundled dependency members; start a fresh archive.
+            Remove-Item target/native-safety/src/Release/lbug.lib -ErrorAction SilentlyContinue
             cmake --build target/native-safety --config Release --target maestro_windows_root maestro_native_safety --parallel 3
             if ($LASTEXITCODE -ne 0) { throw 'Root mutation build failed' }
             Copy-Item target/native-safety/Release/maestro_windows_root.exe $exe -Force
