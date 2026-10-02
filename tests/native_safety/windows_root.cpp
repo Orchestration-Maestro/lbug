@@ -224,6 +224,22 @@ int main(int argc, char** argv) {
             std::vector<std::pair<fs::path, Snapshot>> snapshots;
             for (const auto& entry : fs::directory_iterator(fixture)) snapshots.emplace_back(entry.path(), Snapshot(entry.path()));
             {
+                bool injected = false, rejected = false;
+                {
+                    Hook hook([&](const char* op, void* h, void*) {
+                        if (!injected && std::string(op) == "read" && leaf(h, L"wal.lbdb.wal")) {
+                            injected = true;
+                            throw IOException("review transient WAL read failure");
+                        }
+                        return 0;
+                    });
+                    try { lbug::main::Database db(RootDirectory::open(utf8(fixture)), "wal.lbdb", config); }
+                    catch (const IOException& e) { rejected = std::string(e.what()).find("review transient WAL read failure") != std::string::npos; }
+                }
+                require(injected, "SETUP transient WAL read was not injected");
+                require(rejected, "transient WAL read failure silently accepted");
+            }
+            {
                 auto root = RootDirectory::open(utf8(fixture));
                 lbug::main::Database db(root, "wal.lbdb", config);
                 lbug::main::Connection connection(&db);
@@ -266,8 +282,8 @@ int main(int argc, char** argv) {
             auto root = RootDirectory::open(utf8(path));
             LocalFileSystem local("db.lbdb", root);
             auto file = local.openFile("db.lbdb", FileOpenFlags(FileFlags::READ_ONLY));
-            refuses([&] { file->writeFile(reinterpret_cast<const uint8_t*>("x"), 1, 0); }, "rooted write accepted");
-            refuses([&] { file->truncate(0); }, "rooted truncate accepted");
+            refuses([&] { file->writeFile(reinterpret_cast<const uint8_t*>("x"), 1, 0); }, "rooted write accepted", "Restricted writable handle I/O");
+            refuses([&] { file->truncate(0); }, "rooted truncate accepted", "Restricted writable truncate");
             refuses([&] { file->syncFile(); }, "rooted sync accepted");
             refuses([&] { local.syncDirectoryForFile("db.lbdb"); }, "directory sync became a no-op");
             refuses([&] { local.adoptCompanionFiles(); }, "read-only adoption accepted");
@@ -387,6 +403,32 @@ int main(int argc, char** argv) {
                 require(opens > 0, "no-follow test did not reach NtCreateFile");
             }
             fs::remove_all(fixture);
+        });
+        test("delete_pending_is_required", [&] {
+            auto root = RootDirectory::open(utf8(path));
+            Hook hook([](const char* op, void* h, void* info) {
+                if (std::string(op) == "standard" && leaf(h, L"db.lbdb"))
+                    static_cast<FILE_STANDARD_INFO*>(info)->DeletePending = TRUE;
+                return 0;
+            });
+            refuses([&] { root->probeRegularFile("db.lbdb"); }, "delete-pending file accepted", "delete-pending");
+        });
+        test("metadata_open_status_is_not_absence", [&] {
+            for (const auto status : {0xC0000022UL, 0xC000000DUL}) {
+                auto root = RootDirectory::open(utf8(path));
+                bool injected = false;
+                Hook hook([&](const char* op, void* h, void* info) {
+                    if (std::string(op) == "native-open-status" && leaf(h, L"db.lbdb")) {
+                        *static_cast<LONG*>(info) = static_cast<LONG>(status);
+                        injected = true;
+                    }
+                    return 0;
+                });
+                refuses([&] { root->probeRegularFile("db.lbdb"); },
+                    status == 0xC0000022UL ? "access-denied metadata reported absent" : "unexpected metadata status reported absent",
+                    "NTSTATUS=" + std::to_string(status));
+                require(injected, "SETUP exact metadata status was not injected");
+            }
         });
         test("link_count_is_required", [&] {
             auto root = RootDirectory::open(utf8(path));
