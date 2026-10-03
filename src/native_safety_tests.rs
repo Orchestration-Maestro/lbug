@@ -1,6 +1,8 @@
 use crate::RootDirectory;
 use crate::{Connection, Database, SystemConfig, Value};
 
+mod hash_index_rollback_tests;
+
 #[cfg(unix)]
 fn snapshot_outside(
     root: &std::path::Path,

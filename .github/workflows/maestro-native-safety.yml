@@ -98,11 +98,13 @@ jobs:
           if-no-files-found: error
 
   native-safety:
-    name: native-safety (${{ matrix.os }})
+    name: native-safety (${{ matrix.os }}, runtime checks ${{ matrix.runtime_checks }})
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
+        # Exercise the assertion and ordinary Release behaviour separately.
+        runtime_checks: ['ON', 'OFF']
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     env:
@@ -130,7 +132,7 @@ jobs:
             "$($_.Name)=$($_.Value)" >> $env:GITHUB_ENV
           }
       - name: Configure native tests from this revision
-        run: cmake -S tests/native_safety -B target/native-safety -DCMAKE_BUILD_TYPE=Release
+        run: cmake -S tests/native_safety -B target/native-safety -DCMAKE_BUILD_TYPE=Release -DENABLE_RUNTIME_CHECKS=${{ matrix.runtime_checks }}
       - name: Build native tests
         run: cmake --build target/native-safety --config Release --parallel 3
       - name: Run native tests (standard-user Windows root runs in the focused job)
@@ -150,7 +152,7 @@ jobs:
           LBUG_INCLUDE_DIR: ${{ github.workspace }}/lbug-src/src/include
         run: |
           export CXXFLAGS="-DLBUG_BUNDLED -I$PWD/target/native-safety/engine/src/include"
-          cargo test --release --locked --no-default-features
+          cargo test --release --locked --no-default-features -- --nocapture
       - name: Rust tests using the same archive (Windows read-only)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -160,7 +162,7 @@ jobs:
           if (!(Test-Path "$env:LBUG_LIBRARY_DIR/lbug.lib")) { throw 'Source-built lbug.lib is missing' }
           $env:LBUG_INCLUDE_DIR = "$pwd/lbug-src/src/include"
           $env:CXXFLAGS = "/DLBUG_BUNDLED /I$pwd/target/native-safety/engine/src/include"
-          cargo test --release --locked --no-default-features
+          cargo test --release --locked --no-default-features -- --nocapture
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Format Rust bindings
         run: cargo fmt --check
@@ -170,7 +172,7 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
-          name: native-safety-${{ matrix.os }}-${{ github.sha }}
+          name: native-safety-${{ matrix.os }}-checks-${{ matrix.runtime_checks }}-${{ github.sha }}
           path: |
             target/native-safety/Testing/Temporary/LastTest.log
             native-filesystem-audit.txt
