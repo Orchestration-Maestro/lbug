@@ -252,7 +252,7 @@ jobs:
           $passwordCheck = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes('$present = [bool]$env:PROBE_PASSWORD; "password_present=$present"; if ($present) { exit 1 }'))
           & pwsh -NoProfile -EncodedCommand $passwordCheck | Tee-Object target/windows-root-evidence/build-credentials.txt
           if ($LASTEXITCODE -ne 0) { throw 'Build inherited an account password' }
-          cmake -S tests/native_safety -B target/native-safety -DCMAKE_BUILD_TYPE=Release
+          cmake -S tests/native_safety -B target/native-safety -DCMAKE_BUILD_TYPE=Release -DENABLE_RUNTIME_CHECKS=ON
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cmake --build target/native-safety --config Release --target maestro_windows_root --parallel 3
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -327,8 +327,13 @@ jobs:
           Remove-Item (Join-Path $evidence 'lbug-rust-tests.exe')
           $rust = Run-RootChild $rustExe @('native_safety_tests', '--nocapture', '--test-threads=3') 'rust-root-green'
           if ($rust[-1] -ne 0) { throw 'Standard-user Rust rooted tests failed' }
-          foreach ($required in @('windows_rooted_read_only_roundtrip_and_wrapper_lifetime ... ok', 'windows_writable_rooted_constructor_refuses_before_io ... ok', '2 passed; 0 failed')) {
+          foreach ($required in @('windows_rooted_read_only_roundtrip_and_wrapper_lifetime ... ok', 'windows_writable_rooted_constructor_refuses_before_io ... ok', '3 passed; 0 failed')) {
             if (!(Select-String -Path (Join-Path $evidence 'rust-root-green.txt') -SimpleMatch $required -Quiet)) { throw "Missing mandatory Rust evidence: $required" }
+          }
+          foreach ($case in @('empty_short_control', 'fresh_short_rollback', 'fresh_long_rollback', 'a_schema_checkpoint_fresh', 'b_schema_checkpoint_committed', 'c_schema_checkpoint_overflow', 'd_schema_checkpoint_cycles', 'committed_rollback_control')) {
+            foreach ($result in @('REOPEN_OK', 'KEY_REUSE_OK')) {
+              if (!(Select-String -Path (Join-Path $evidence 'rust-root-green.txt') -SimpleMatch "MATRIX ${case}: $result" -Quiet)) { throw "Missing matrix evidence: $case $result" }
+            }
           }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
