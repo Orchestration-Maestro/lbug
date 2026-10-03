@@ -13,6 +13,9 @@ mod handles;
 #[path = "cache_inventory.rs"]
 mod inventory;
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[path = "cache_bootstrap.rs"]
+mod bootstrap;
 #[path = "cache_preset.rs"]
 mod preset;
 
@@ -477,4 +480,40 @@ fn linked_entry_is_refused_without_following_it() {
     fixture.build("target-b");
     assert_eq!(fixture.compiles(), 2, "linked entry was followed");
     assert!(entry.is_symlink(), "linked entry was overwritten");
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn real_bootstrap_snapshots_reuse_one_verified_native_build() {
+    use crate::cfg_snapshots::{self, BOOTSTRAP, COVERAGE, NORMAL, SEMVER};
+    let fixture = Fixture::new();
+    let _cfgs = cfg_snapshots::Inputs::new();
+    cfg_snapshots::apply(NORMAL, "");
+    let cold = fixture.build("ordinary");
+    assert_eq!(fixture.compiles(), 1);
+    let entry = fixture.entry();
+    for (target, snapshot, flags) in [
+        ("coverage", NORMAL, COVERAGE),
+        ("semver", BOOTSTRAP, SEMVER),
+    ] {
+        cfg_snapshots::apply(snapshot, flags);
+        let hit = fixture.build(target);
+        assert_eq!(fixture.compiles(), 1, "{target} rebuilt the C++ engine");
+        assert_eq!(fixture.entry(), entry, "{target} created a different key");
+        assert_ne!(hit[2], cold[2], "cache artifacts must be copied to OUT_DIR");
+        assert_eq!(
+            fs::read(hit[2].join("preset.h")).unwrap(),
+            fs::read(cold[2].join("preset.h")).unwrap()
+        );
+    }
+    // A compatible key must still verify the artifacts, not trust a hit stamp.
+    let archive = entry.join("build/src/liblbug.a");
+    fs::write(&archive, b"corrupt artifact").unwrap();
+    fixture.build("semver-corrupt");
+    assert_eq!(
+        fixture.compiles(),
+        2,
+        "semver reused an unverified artifact"
+    );
+    assert_eq!(fs::read(archive).unwrap(), b"corrupt artifact");
 }

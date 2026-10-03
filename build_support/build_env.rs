@@ -232,6 +232,27 @@ pub(crate) fn watch() {
     }
 }
 
+// rustc 1.98.1 --print=cfg under RUSTC_BOOTSTRAP=1 exposes these values.
+// The pinned-helper audit (cc 1.5.1, cmake 0.1.58, cxx-build 1.0.202)
+// plus the digested-source CARGO_CFG_ check permits this normalization;
+// unknown values and trees containing that marker must remain keyed.
+#[cfg(unix)]
+pub(crate) fn bootstrap_cfg_value(name: &str) -> Option<&'static str> {
+    match name {
+        "CARGO_CFG_FMT_DEBUG" => Some("full"),
+        "CARGO_CFG_RELOCATION_MODEL" => Some("pic"),
+        "CARGO_CFG_TARGET_HAS_ATOMIC_LOAD_STORE" => Some("16,32,64,8,ptr"),
+        "CARGO_CFG_TARGET_OBJECT_FORMAT" => Some("elf"),
+        "CARGO_CFG_OVERFLOW_CHECKS"
+        | "CARGO_CFG_UB_CHECKS"
+        | "CARGO_CFG_TARGET_HAS_RELIABLE_F128"
+        | "CARGO_CFG_TARGET_HAS_RELIABLE_F16"
+        | "CARGO_CFG_TARGET_HAS_RELIABLE_F16_MATH"
+        | "CARGO_CFG_TARGET_THREAD_LOCAL" => Some(""),
+        _ => None,
+    }
+}
+
 pub(crate) fn native_names() -> Vec<String> {
     names(|kind| kind != Kind::Watch && kind.active())
 }
