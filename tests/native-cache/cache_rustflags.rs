@@ -301,6 +301,12 @@ fn real_bootstrap_snapshot_keeps_native_key_boundaries() {
         assert_ne!(inputs.key(), plain, "{name}={value}");
         inputs.set(name, saved.as_deref());
     }
+    inputs.set("CARGO_CFG_FUTURE_BOOTSTRAP", Some("x87"));
+    assert_eq!(
+        super::native_value("CARGO_CFG_FUTURE_BOOTSTRAP"),
+        Some("x87".into())
+    );
+    inputs.set("CARGO_CFG_FUTURE_BOOTSTRAP", None);
     for features in ["x87,fxsr,sse,sse2", "fxsr,x87,sse,sse2"] {
         inputs.set("CARGO_CFG_TARGET_FEATURE", Some(features));
         assert_eq!(inputs.key(), plain, "only x87 should be removed");
@@ -308,9 +314,78 @@ fn real_bootstrap_snapshot_keeps_native_key_boundaries() {
     for name in ["CARGO_CFG_FMT_DEBUG", "CARGO_CFG_TARGET_FEATURE"] {
         cfg_snapshots::apply(BOOTSTRAP, SEMVER);
         env::set_var(name, OsString::from_vec(b"x87\xff".to_vec()));
+        assert_eq!(
+            super::native_value(name).unwrap().as_encoded_bytes(),
+            b"x87\xff"
+        );
         assert_ne!(inputs.key(), plain, "non-Unicode {name} was ignored");
     }
     cfg_snapshots::apply(BOOTSTRAP, SEMVER);
     fs::write(inputs.source.path().join("fixture.cpp"), "int changed;\n").unwrap();
     assert_ne!(inputs.key(), plain, "source bytes were ignored");
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn bootstrap_cfg_marker_across_digest_boundary_keeps_inputs_keyed() {
+    use crate::cfg_snapshots::{self, BOOTSTRAP, NORMAL, SEMVER};
+    let _cfgs = cfg_snapshots::Inputs::new();
+    let mut inputs = Inputs::new();
+    let mut source = vec![b' '; 8192 - 5];
+    source.extend_from_slice(b"CARGO_CFG_");
+    fs::write(inputs.source.path().join("fixture.cpp"), source).unwrap();
+    cfg_snapshots::apply(NORMAL, "");
+    let normal = inputs.key();
+    cfg_snapshots::apply(BOOTSTRAP, SEMVER);
+    assert_ne!(inputs.key(), normal, "split Cargo cfg marker was missed");
+    let bootstrap = inputs.key();
+    // Ineligible trees retain each of the ten pairs, not just FMT_DEBUG.
+    for name in crate::build_env::native_names() {
+        if crate::build_env::bootstrap_cfg_value(&name).is_some() {
+            env::remove_var(&name);
+            assert_ne!(inputs.key(), bootstrap, "{name} was dropped");
+            cfg_snapshots::apply(BOOTSTRAP, SEMVER);
+        }
+    }
+    inputs.set("CARGO_CFG_TARGET_FEATURE", Some("fxsr,sse,sse2"));
+    assert_ne!(inputs.key(), bootstrap, "x87 was dropped");
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn bundled_source_is_eligible_for_bootstrap_normalization() {
+    use crate::cfg_snapshots::{self, BOOTSTRAP, NORMAL, SEMVER};
+    let _cfgs = cfg_snapshots::Inputs::new();
+    let _inputs = Inputs::new();
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../lbug-src");
+    assert_eq!(super::files(&root).unwrap().len(), 2802);
+    cfg_snapshots::apply(NORMAL, "");
+    let normal = key(&root).unwrap();
+    cfg_snapshots::apply(BOOTSTRAP, SEMVER);
+    assert_eq!(key(&root).unwrap(), normal, "bundled tree lost reuse");
+}
+
+#[test]
+fn bootstrap_marker_scan_preserves_digest_at_every_split() {
+    use sha2::{Digest, Sha256};
+    let source = tempfile::tempdir().unwrap();
+    let path = source.path().join("bytes");
+    for offset in [0, 8192, 16384].into_iter().chain(8183..8192) {
+        let mut bytes = vec![b'\xff'; offset];
+        bytes.extend_from_slice(b"CARGO_CFG_");
+        bytes.extend_from_slice(&[b'\xff'; 8192]);
+        fs::write(&path, &bytes).unwrap();
+        let mut eligible = true;
+        let digest = super::digest_file_with_bootstrap_check(&path, &mut eligible).unwrap();
+        assert!(!eligible, "marker at byte {offset} was missed");
+        assert_eq!(digest, super::hex(&Sha256::digest(&bytes)));
+        assert_eq!(super::digest_file(&path).unwrap(), digest);
+    }
+    for bytes in [b"".as_slice(), b"CARGO_CFG", b"CARGO_CF_G_"] {
+        fs::write(&path, bytes).unwrap();
+        let mut eligible = true;
+        let digest = super::digest_file_with_bootstrap_check(&path, &mut eligible).unwrap();
+        assert!(eligible, "neighbour marker disabled normalization");
+        assert_eq!(digest, super::hex(&Sha256::digest(bytes)));
+    }
 }

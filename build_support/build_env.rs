@@ -233,8 +233,9 @@ pub(crate) fn watch() {
 }
 
 // rustc 1.98.1 --print=cfg under RUSTC_BOOTSTRAP=1 exposes these values.
-// cmake 0.1.58 reads only target OS/arch; cc 1.5.1 reads target identity
-// and crt-static, not this metadata. Unknown values must remain keyed.
+// The pinned-helper audit (cc 1.5.1, cmake 0.1.58, cxx-build 1.0.202)
+// plus the digested-source CARGO_CFG_ check permits this normalization;
+// unknown values and trees containing that marker must remain keyed.
 #[cfg(unix)]
 pub(crate) fn bootstrap_cfg_value(name: &str) -> Option<&'static str> {
     match name {

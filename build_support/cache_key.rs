@@ -30,15 +30,34 @@ fn field(hash: &mut Sha256, bytes: &[u8]) {
 
 #[cfg(unix)]
 pub(super) fn digest_file(path: &Path) -> io::Result<String> {
+    digest_file_with_bootstrap_check(path, &mut false)
+}
+
+#[cfg(unix)]
+fn digest_file_with_bootstrap_check(path: &Path, eligible: &mut bool) -> io::Result<String> {
+    const MARKER: &[u8] = b"CARGO_CFG_";
     let mut file = fs::File::open(path)?;
     let mut hash = Sha256::new();
-    let mut buffer = [0_u8; 8192];
+    let mut buffer = [0_u8; 8192 + MARKER.len() - 1];
+    let mut carry = 0;
     loop {
-        let count = io::Read::read(&mut file, &mut buffer)?;
+        let count = io::Read::read(&mut file, &mut buffer[carry..carry + 8192])?;
         if count == 0 {
             break;
         }
-        hash.update(&buffer[..count]);
+        hash.update(&buffer[carry..carry + count]);
+        if *eligible {
+            let end = carry + count;
+            if buffer[..end]
+                .windows(MARKER.len())
+                .any(|bytes| bytes == MARKER)
+            {
+                *eligible = false;
+            }
+            // Retain the possible prefix across even a short read boundary.
+            carry = end.min(MARKER.len() - 1);
+            buffer.copy_within(end - carry..end, 0);
+        }
     }
     Ok(hex(&hash.finalize()))
 }
@@ -208,10 +227,7 @@ fn native_rustflags(name: &str, value: &OsStr) -> std::ffi::OsString {
 
 #[cfg(unix)]
 fn native_value(name: &str) -> Option<std::ffi::OsString> {
-    let value = env::var_os(name)?;
-    if RUST_ONLY_CFGS.iter().any(|(_, variable)| *variable == name) && value.is_empty() {
-        return None;
-    }
+    let value = native_value_before_bootstrap(name)?;
     if env::bootstrap_cfg_value(name).is_some_and(|expected| value == expected) {
         return None;
     }
@@ -228,6 +244,15 @@ fn native_value(name: &str) -> Option<std::ffi::OsString> {
                     .into(),
             );
         }
+    }
+    Some(value)
+}
+
+#[cfg(unix)]
+fn native_value_before_bootstrap(name: &str) -> Option<std::ffi::OsString> {
+    let value = env::var_os(name)?;
+    if RUST_ONLY_CFGS.iter().any(|(_, variable)| *variable == name) && value.is_empty() {
+        return None;
     }
     if name == "RUSTFLAGS" || name == "CARGO_ENCODED_RUSTFLAGS" {
         let value = native_rustflags(name, &value);
@@ -248,20 +273,28 @@ pub(super) fn key(root: &Path) -> io::Result<String> {
     field(&mut hash, include_bytes!("cache_key.rs"));
     field(&mut hash, include_bytes!("build_env.rs"));
     field(&mut hash, include_bytes!("../Cargo.lock"));
+    let mut bootstrap_eligible = true;
     for path in files(root)? {
         field(&mut hash, path.as_os_str().as_encoded_bytes());
-        field(&mut hash, digest_file(&root.join(path))?.as_bytes());
+        field(
+            &mut hash,
+            digest_file_with_bootstrap_check(&root.join(path), &mut bootstrap_eligible)?.as_bytes(),
+        );
     }
     println!("cargo:rerun-if-changed={}", root.display());
     let target = env::var("TARGET").map_err(io::Error::other)?;
     let host = env::var("HOST").map_err(io::Error::other)?;
     for name in env::native_names() {
-        let value = native_value(&name);
+        let value = if bootstrap_eligible {
+            native_value(&name)
+        } else {
+            native_value_before_bootstrap(&name)
+        };
         // Omit proven Rust-only cfg names too: absent dynamic cfgs are not
         // in native_names. Non-allowlisted values remain present and keyed.
         if value.is_none()
             && (RUST_ONLY_CFGS.iter().any(|(_, variable)| *variable == name)
-                || env::bootstrap_cfg_value(&name).is_some())
+                || (bootstrap_eligible && env::bootstrap_cfg_value(&name).is_some()))
         {
             continue;
         }

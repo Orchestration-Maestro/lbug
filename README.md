@@ -82,8 +82,13 @@ cache. OpenSSL and pkg-config roots are inputs only with `extension_installer`
 enabled; the default-feature-free engine neither keys nor consumes those roots.
 Only recognized scalar flag families are keyed; unknown flags and path-bearing
 values also bypass. The environment declaration is in `build_support/build_env.rs`
-and the scalar flag table is in `build_support/cache_key.rs`. Unsupported atomic
-no-replace publication keeps a private complete output, never replaces an entry.
+and the scalar flag table is in `build_support/cache_key.rs`.
+Bootstrap cfg/`x87` normalization relies on the pinned-helper audit (cc 1.5.1,
+cmake 0.1.58, cxx-build 1.0.202) plus checking that no digested source file
+contains `CARGO_CFG_`; sources reading unkeyed environment variables without
+that spelling retain the same risk as other unkeyed variables before this change.
+Unsupported atomic no-replace publication keeps a private complete output,
+never replaces an entry.
 
 Unset the variable for the original source-build behavior. The legacy
 `LBUG_REUSE_CMAKE_BUILD` is unchanged when the external cache is unset, but the
