@@ -233,3 +233,84 @@ fn allowlist_cannot_change_cc_prefer_clang() {
         assert!(!variable.contains("linker-plugin-lto"));
     }
 }
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn real_bootstrap_snapshots_have_equal_native_keys_and_compiler_arguments() {
+    use crate::cfg_snapshots::{self, BOOTSTRAP, COVERAGE, NORMAL, SEMVER};
+    let _cfgs = cfg_snapshots::Inputs::new();
+    let inputs = Inputs::new();
+    cfg_snapshots::apply(NORMAL, "");
+    let plain = inputs.key();
+    let arguments = cfg_snapshots::compiler_args();
+    assert_eq!(
+        env::var("CARGO_CFG_TARGET_FEATURE").unwrap(),
+        "fxsr,sse,sse2"
+    );
+    for (snapshot, flags) in [(NORMAL, COVERAGE), (BOOTSTRAP, SEMVER)] {
+        cfg_snapshots::apply(snapshot, flags);
+        assert_eq!(cfg_snapshots::compiler_args(), arguments, "{flags}");
+        if flags == SEMVER {
+            assert_eq!(
+                env::var("CARGO_CFG_TARGET_FEATURE").unwrap(),
+                "fxsr,sse,sse2,x87"
+            );
+            assert_eq!(
+                env::var("CARGO_CFG_TARGET_HAS_ATOMIC_LOAD_STORE").unwrap(),
+                "16,32,64,8,ptr"
+            );
+        }
+        assert_eq!(inputs.key(), plain, "{flags}");
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn real_bootstrap_snapshot_keeps_native_key_boundaries() {
+    use crate::cfg_snapshots::{self, BOOTSTRAP, SEMVER};
+    use std::os::unix::ffi::OsStringExt;
+    let _cfgs = cfg_snapshots::Inputs::new();
+    let mut inputs = Inputs::new();
+    cfg_snapshots::apply(BOOTSTRAP, SEMVER);
+    let plain = inputs.key();
+    for (name, value) in [
+        ("CXXFLAGS", "-DNATIVE_FLAG=1"),
+        ("PROFILE", "changed-profile"),
+        ("CARGO_CFG_TARGET_FEATURE", "fxsr,sse,sse2,x87,crt-static"),
+        ("CARGO_CFG_TARGET_FEATURE", "fxsr,sse,sse2,x87,avx2"),
+        ("CARGO_CFG_TARGET_FEATURE", "fxsr,sse,sse2,x87_extra"),
+        ("CARGO_CFG_TARGET_OS", "future-os"),
+        ("CARGO_CFG_TARGET_ARCH", "future-arch"),
+        ("CARGO_CFG_TARGET_ABI", "future-abi"),
+        ("CARGO_CFG_FUTURE_BOOTSTRAP", ""),
+        ("CARGO_CFG_FMT_DEBUG_EXTRA", "full"),
+        ("CARGO_CFG_TARGET_HAS_RELIABLE_F16_EXTRA", ""),
+        ("CARGO_CFG_FMT_DEBUG", "future"),
+        ("CARGO_CFG_OVERFLOW_CHECKS", "future"),
+        ("CARGO_CFG_RELOCATION_MODEL", "future"),
+        ("CARGO_CFG_UB_CHECKS", "future"),
+        ("CARGO_CFG_TARGET_HAS_ATOMIC_LOAD_STORE", "future"),
+        ("CARGO_CFG_TARGET_HAS_RELIABLE_F128", "future"),
+        ("CARGO_CFG_TARGET_HAS_RELIABLE_F16", "future"),
+        ("CARGO_CFG_TARGET_HAS_RELIABLE_F16_MATH", "future"),
+        ("CARGO_CFG_TARGET_OBJECT_FORMAT", "future"),
+        ("CARGO_CFG_TARGET_THREAD_LOCAL", "future"),
+    ] {
+        let saved = env::var(name).ok();
+        inputs.set(name, Some(value));
+        assert_ne!(inputs.key(), plain, "{name}={value}");
+        inputs.set(name, saved.as_deref());
+    }
+    for features in ["x87,fxsr,sse,sse2", "fxsr,x87,sse,sse2"] {
+        inputs.set("CARGO_CFG_TARGET_FEATURE", Some(features));
+        assert_eq!(inputs.key(), plain, "only x87 should be removed");
+    }
+    for name in ["CARGO_CFG_FMT_DEBUG", "CARGO_CFG_TARGET_FEATURE"] {
+        cfg_snapshots::apply(BOOTSTRAP, SEMVER);
+        env::set_var(name, OsString::from_vec(b"x87\xff".to_vec()));
+        assert_ne!(inputs.key(), plain, "non-Unicode {name} was ignored");
+    }
+    cfg_snapshots::apply(BOOTSTRAP, SEMVER);
+    fs::write(inputs.source.path().join("fixture.cpp"), "int changed;\n").unwrap();
+    assert_ne!(inputs.key(), plain, "source bytes were ignored");
+}

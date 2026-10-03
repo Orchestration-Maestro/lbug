@@ -212,6 +212,23 @@ fn native_value(name: &str) -> Option<std::ffi::OsString> {
     if RUST_ONLY_CFGS.iter().any(|(_, variable)| *variable == name) && value.is_empty() {
         return None;
     }
+    if env::bootstrap_cfg_value(name).is_some_and(|expected| value == expected) {
+        return None;
+    }
+    if name == "CARGO_CFG_TARGET_FEATURE" {
+        if let Some(features) = value.to_str() {
+            // cc only consumes crt-static from this derived cfg; keep every
+            // other token except the bootstrap-only x87 spelling.
+            return Some(
+                features
+                    .split(',')
+                    .filter(|feature| *feature != "x87")
+                    .collect::<Vec<_>>()
+                    .join(",")
+                    .into(),
+            );
+        }
+    }
     if name == "RUSTFLAGS" || name == "CARGO_ENCODED_RUSTFLAGS" {
         let value = native_rustflags(name, &value);
         return if value.is_empty() { None } else { Some(value) };
@@ -240,9 +257,12 @@ pub(super) fn key(root: &Path) -> io::Result<String> {
     let host = env::var("HOST").map_err(io::Error::other)?;
     for name in env::native_names() {
         let value = native_value(&name);
-        // Cargo derives empty variables for the three bare Rust-only cfgs.
-        // Omit their names too: absent dynamic cfgs are not in native_names.
-        if value.is_none() && RUST_ONLY_CFGS.iter().any(|(_, variable)| *variable == name) {
+        // Omit proven Rust-only cfg names too: absent dynamic cfgs are not
+        // in native_names. Non-allowlisted values remain present and keyed.
+        if value.is_none()
+            && (RUST_ONLY_CFGS.iter().any(|(_, variable)| *variable == name)
+                || env::bootstrap_cfg_value(&name).is_some())
+        {
             continue;
         }
         field(&mut hash, name.as_bytes());
