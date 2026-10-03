@@ -1,5 +1,10 @@
 use super::key;
-use std::{env, ffi::OsString, fs, process::Command};
+use std::{
+    env,
+    ffi::{OsStr, OsString},
+    fs,
+    process::Command,
+};
 
 struct Inputs {
     saved: Vec<(String, Option<OsString>)>,
@@ -182,6 +187,23 @@ fn opaque_arguments_are_not_removed_beside_allowlisted_flags() {
             )),
         );
         assert_eq!(inputs.key(), expected, "{opaque}");
+    }
+}
+
+#[test]
+fn opaque_option_value_pairs_are_preserved_byte_for_byte() {
+    for (plain, encoded) in [
+        ("--unknown --cfg=coverage", "--unknown\u{1f}--cfg=coverage"),
+        ("-Z --cfg=coverage", "-Z\u{1f}--cfg=coverage"),
+        ("-C --cfg=coverage", "-C\u{1f}--cfg=coverage"),
+    ] {
+        for (name, flags) in [("RUSTFLAGS", plain), ("CARGO_ENCODED_RUSTFLAGS", encoded)] {
+            assert_eq!(
+                super::native_rustflags(name, OsStr::new(flags)).as_encoded_bytes(),
+                flags.as_bytes(),
+                "{name}: {flags:?}"
+            );
+        }
     }
 }
 
