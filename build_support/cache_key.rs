@@ -1,4 +1,7 @@
 use crate::build_env as env;
+#[cfg(all(test, unix))]
+#[path = "../tests/native-cache/cache_rustflags.rs"]
+mod rustflags_tests;
 #[cfg(unix)]
 use sha2::{Digest, Sha256};
 use std::path::Path;
@@ -124,6 +127,98 @@ fn target_env(base: &str, target: &str, host: &str) -> Option<std::ffi::OsString
     .find_map(env::var_os)
 }
 
+// cargo-llvm-cov 0.9.1 src/main.rs:155–159,194–198,260–264;
+// cargo-semver-checks 0.50.0 src/data_generation/generate.rs:36–40.
+// cc 1.4.2 / 1.5.1 do not inherit these into native compiler flags.
+#[cfg(unix)]
+const RUST_ONLY_CFGS: &[(&str, &str)] = &[
+    ("coverage", "CARGO_CFG_COVERAGE"),
+    ("coverage_nightly", "CARGO_CFG_COVERAGE_NIGHTLY"),
+    ("trybuild_no_target", "CARGO_CFG_TRYBUILD_NO_TARGET"),
+];
+
+#[cfg(unix)]
+const RUST_ONLY_FLAGS: &[&[&str]] = &[
+    &["-C", "instrument-coverage"],
+    &["-Cinstrument-coverage"],
+    &["--cap-lints", "allow"],
+    &["--cap-lints=allow"],
+];
+
+#[cfg(unix)]
+fn native_rustflags(name: &str, value: &OsStr) -> std::ffi::OsString {
+    let Some(value) = value.to_str() else {
+        return value.to_owned();
+    };
+    let tokens: Vec<_> = if name == "CARGO_ENCODED_RUSTFLAGS" {
+        value.split('\u{1f}').collect()
+    } else {
+        // Cargo splits RUSTFLAGS on whitespace, not shell quoting.
+        value.split_whitespace().collect()
+    };
+    let mut kept = Vec::new();
+    let mut index = 0;
+    while let Some(&flag) = tokens.get(index) {
+        let next = tokens.get(index + 1).copied();
+        if let Some(spelling) = RUST_ONLY_FLAGS
+            .iter()
+            .find(|spelling| tokens[index..].starts_with(spelling))
+        {
+            index += spelling.len();
+            continue;
+        }
+        if flag == "--cfg"
+            && next.is_some_and(|cfg| RUST_ONLY_CFGS.iter().any(|(bare, _)| *bare == cfg))
+        {
+            index += 2;
+            continue;
+        }
+        if flag
+            .strip_prefix("--cfg=")
+            .is_some_and(|cfg| RUST_ONLY_CFGS.iter().any(|(bare, _)| *bare == cfg))
+        {
+            index += 1;
+            continue;
+        }
+        kept.push(flag);
+        index += 1;
+        // Known joined options have no following argument. All other switches
+        // retain the next token as opaque, even if it resembles an allowlist
+        // entry. Over-retention costs a miss rather than an incorrect hit.
+        let joined = ["-C", "-Z", "-L", "-l", "-W", "-A", "-D", "-F"]
+            .iter()
+            .any(|prefix| flag.starts_with(prefix) && flag.len() > prefix.len())
+            || ["--cfg=", "--cap-lints=", "--codegen="]
+                .iter()
+                .any(|prefix| flag.starts_with(prefix));
+        if flag.starts_with('-') && !joined {
+            if let Some(next) = next {
+                kept.push(next);
+                index += 1;
+            }
+        }
+    }
+    kept.join(if name == "CARGO_ENCODED_RUSTFLAGS" {
+        "\u{1f}"
+    } else {
+        " "
+    })
+    .into()
+}
+
+#[cfg(unix)]
+fn native_value(name: &str) -> Option<std::ffi::OsString> {
+    let value = env::var_os(name)?;
+    if RUST_ONLY_CFGS.iter().any(|(_, variable)| *variable == name) && value.is_empty() {
+        return None;
+    }
+    if name == "RUSTFLAGS" || name == "CARGO_ENCODED_RUSTFLAGS" {
+        let value = native_rustflags(name, &value);
+        return if value.is_empty() { None } else { Some(value) };
+    }
+    Some(value)
+}
+
 /// Length-delimited SHA-256 of source bytes and all inputs to this native build.
 /// `OUT_DIR`, job counts and the cache location do not change the native output.
 #[cfg(unix)]
@@ -144,9 +239,15 @@ pub(super) fn key(root: &Path) -> io::Result<String> {
     let target = env::var("TARGET").map_err(io::Error::other)?;
     let host = env::var("HOST").map_err(io::Error::other)?;
     for name in env::native_names() {
+        let value = native_value(&name);
+        // Cargo derives empty variables for the three bare Rust-only cfgs.
+        // Omit their names too: absent dynamic cfgs are not in native_names.
+        if value.is_none() && RUST_ONLY_CFGS.iter().any(|(_, variable)| *variable == name) {
+            continue;
+        }
         field(&mut hash, name.as_bytes());
-        // Preserve absent versus empty (e.g. presence of LBUG_SHARED).
-        if let Some(value) = env::var_os(&name) {
+        // Preserve absent versus empty except for the proven Rust-only inputs.
+        if let Some(value) = value {
             field(&mut hash, b"set");
             field(&mut hash, value.as_encoded_bytes());
         } else {
@@ -223,7 +324,7 @@ enum ScalarRule {
 // Only bounded scalar families may be keyed. Unknown switches, positional
 // files, response files and path-bearing options bypass instead of guessing.
 // These include the fixture and ordinary native hardening/PIC/ABI flags;
-// E04's Rust coverage/mutation flags are separately keyed in native_names.
+// Rust flags are keyed separately, minus the proven Rust-only allowlist.
 const SCALAR_FLAGS: &[(&str, ScalarRule)] = &[
     ("-D", ScalarRule::Macro),
     ("-U", ScalarRule::Macro),
