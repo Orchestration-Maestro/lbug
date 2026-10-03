@@ -287,6 +287,22 @@ fn build_bundled_cmake() -> Vec<PathBuf> {
         build.define("CMAKE_MSVC_RUNTIME_LIBRARY", "MultiThreadedDLL");
         build.define("CMAKE_POLICY_DEFAULT_CMP0091", "NEW");
     }
+    // Use CMake's effective profile: opt-level 0 selects Debug even when
+    // Rust debug information is off. Keep this preset in the source-hashed
+    // build implementation rather than an external toolchain file.
+    if build.get_profile() == "Debug" {
+        let flags = if cfg!(windows) {
+            build
+                .define("CMAKE_C_COMPILER", "cl")
+                .define("CMAKE_CXX_COMPILER", "cl");
+            "/Ob0 /Od /RTC1"
+        } else {
+            "-O0"
+        };
+        build
+            .define("CMAKE_C_FLAGS_DEBUG", flags)
+            .define("CMAKE_CXX_FLAGS_DEBUG", flags);
+    }
     if let Ok(jobs) = env::var("NUM_JOBS") {
         std::env::set_var("CMAKE_BUILD_PARALLEL_LEVEL", jobs);
     }

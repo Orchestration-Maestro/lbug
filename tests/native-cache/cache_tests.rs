@@ -13,6 +13,9 @@ mod handles;
 #[path = "cache_inventory.rs"]
 mod inventory;
 
+#[path = "cache_preset.rs"]
+mod preset;
+
 struct Fixture {
     temp: TempDir,
     root: PathBuf,
@@ -39,6 +42,16 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${{CMAKE_BINARY_DIR}}/src")
 add_library(lbug STATIC fixture.cpp)
 file(MAKE_DIRECTORY "${{CMAKE_BINARY_DIR}}/src/include")
 file(WRITE "${{CMAKE_BINARY_DIR}}/src/include/generated.h" "#define GENERATED 1\n")
+file(WRITE "${{CMAKE_BINARY_DIR}}/src/include/preset.h"
+  "profile=${{CMAKE_BUILD_TYPE}}\n"
+  "c_debug=${{CMAKE_C_FLAGS_DEBUG}}\n"
+  "cxx_debug=${{CMAKE_CXX_FLAGS_DEBUG}}\n"
+  "c_flags=${{CMAKE_C_FLAGS}}\n"
+  "cxx_flags=${{CMAKE_CXX_FLAGS}}\n"
+  "c_release=${{CMAKE_C_FLAGS_RELEASE}}\n"
+  "cxx_release=${{CMAKE_CXX_FLAGS_RELEASE}}\n"
+  "c_compiler=${{CMAKE_C_COMPILER}}\n"
+  "cxx_compiler=${{CMAKE_CXX_COMPILER}}\n")
 "##,
                 env::var("PYTHON")
                     .unwrap_or_else(|_| "python3".into())
@@ -79,12 +92,12 @@ file(WRITE "${{CMAKE_BINARY_DIR}}/src/include/generated.h" "#define GENERATED 1\
         }
     }
 
-    fn build(&self, target: &str) {
+    fn build(&self, target: &str) -> Vec<PathBuf> {
         env::set_var("LBUG_SOURCE_DIR", &self.root);
         let out = self.temp.path().join(target).join("build/lbug-fixture/out");
         fs::create_dir_all(&out).unwrap();
         env::set_var("OUT_DIR", &out);
-        super::build_bundled_cmake();
+        super::build_bundled_cmake()
     }
 
     fn compiles(&self) -> usize {
